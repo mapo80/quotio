@@ -64,6 +64,32 @@ final class LocalAccountDiscoveryTests: XCTestCase {
         XCTAssertEqual(distinct.accountKey, "same@example.com")
     }
 
+    func testMuseAccountComesFromThePointerAndPointsBackAtIt() {
+        let path = "/tmp/muse-test/.config/muse/auth.json"
+        let account = LocalAccountDiscovery.museAccount(
+            pointer: Data("""
+                {"schema_version":2,"providers":{"meta":{"mechanism":"oauth",
+                "storage":"keychain","user_email":"Developer@Example.test"}}}
+                """.utf8),
+            path: path
+        )
+
+        XCTAssertEqual(account?.providerID.rawValue, QuotaProvider.muse.rawValue)
+        XCTAssertEqual(account?.accountKey, "developer@example.test")
+        XCTAssertEqual(account?.displayName, "developer@example.test")
+        XCTAssertEqual(account?.source, .nativeCredential)
+        XCTAssertEqual(account?.credentialReference, path)
+    }
+
+    func testMuseAccountIsAbsentWhenThePointerNamesNoMetaProvider() {
+        XCTAssertNil(
+            LocalAccountDiscovery.museAccount(
+                pointer: Data(#"{"schema_version":2,"providers":{}}"#.utf8),
+                path: "/tmp/muse-test/.config/muse/auth.json"
+            )
+        )
+    }
+
     private func descriptor(
         id: String,
         provider: QuotaProvider,

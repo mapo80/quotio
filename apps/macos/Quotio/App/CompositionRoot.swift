@@ -247,6 +247,7 @@ enum CompositionRoot {
             ),
             QuotioInfrastructure.DevinQuotaFetcher(session: quotaHTTPSession),
             QuotioInfrastructure.GrokQuotaFetcher(session: quotaHTTPSession),
+            QuotioInfrastructure.MuseQuotaFetcher(session: quotaHTTPSession),
         ])
         let quotaScreenModel = QuotaScreenModel(
             coordinator: QuotaRefreshCoordinator(

@@ -92,6 +92,19 @@ final class QuotaModelsTests: XCTestCase {
         XCTAssertEqual(QuotaPolicy.lowestAvailablePercentage(in: quota), 40)
     }
 
+    func testMuseIsTrackedFromItsOwnCLIWithoutProxyRoutingOrManualLogin() {
+        // The local proxy has no Muse upstream, so the account is read where the Muse
+        // Code CLI already keeps it rather than offered as something Quotio can add.
+        XCTAssertTrue(QuotaProvider.muse.isQuotaTrackingOnly)
+        XCTAssertFalse(QuotaProvider.muse.supportsLocalProxySetup)
+        XCTAssertFalse(QuotaProvider.muse.supportsManualAuth)
+        XCTAssertFalse(QuotaProvider.muse.usesAPIKeyAuth)
+        XCTAssertFalse(QuotaProvider.muse.isImportedFromLocalIDE)
+        XCTAssertTrue(QuotaProvider.muse.supportsQuotaOnlyMode)
+        XCTAssertNil(QuotaProvider.muse.cliAgent)
+        XCTAssertEqual(QuotaProvider.muse.rawValue, "muse")
+    }
+
     func testProviderTraitsKeepIDEImportAndRoutingRulesSeparate() {
         XCTAssertTrue(QuotaProvider.cursor.isImportedFromLocalIDE)
         XCTAssertTrue(QuotaProvider.trae.isImportedFromLocalIDE)

@@ -184,6 +184,7 @@ public actor LocalAccountDiscovery: AccountDiscovering {
         accounts.append(contentsOf: await discoverAmpCredential())
         accounts.append(contentsOf: await discoverDevinCredential())
         accounts.append(contentsOf: await discoverGrokCredentials())
+        accounts.append(contentsOf: await discoverMuseCredential())
         if await antigravityDatabase.hasCredential() {
             accounts.append(Self.account(
                 provider: .antigravity,
@@ -248,6 +249,25 @@ public actor LocalAccountDiscovery: AccountDiscovering {
             source: .localIDE,
             credentialReference: databasePath
         )]
+    }
+
+    /// The Muse Code CLI writes a pointer that carries no secret; its presence is what
+    /// marks the account as available. The credential itself stays in the keychain.
+    private func discoverMuseCredential() async -> [Account] {
+        let path = homeDirectory.appendingPathComponent(".config/muse/auth.json").path
+        guard let data = await quotaFiles.read(path: path) else { return [] }
+        return Self.museAccount(pointer: data, path: path).map { [$0] } ?? []
+    }
+
+    static func museAccount(pointer data: Data, path: String) -> Account? {
+        guard let pointer = MuseQuotaFetcher.loadPointer(data: data) else { return nil }
+        return account(
+            provider: .muse,
+            accountKey: pointer.accountKey,
+            displayName: pointer.displayName,
+            source: .nativeCredential,
+            credentialReference: path
+        )
     }
 
     private func discoverGrokCredentials() async -> [Account] {

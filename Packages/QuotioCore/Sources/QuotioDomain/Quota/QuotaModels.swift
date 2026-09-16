@@ -19,6 +19,7 @@ public enum QuotaProvider: String, CaseIterable, Codable, Identifiable, Sendable
     case glm
     case warp
     case clinePass = "clinepass"
+    case muse
 
     public var id: String { rawValue }
 
@@ -41,7 +42,7 @@ public enum QuotaProvider: String, CaseIterable, Codable, Identifiable, Sendable
 
     public var supportsManualAuth: Bool {
         switch self {
-        case .cursor, .trae, .devin, .grok, .glm, .clinePass:
+        case .cursor, .trae, .devin, .grok, .glm, .clinePass, .muse:
             false
         default:
             true
@@ -63,7 +64,7 @@ public enum QuotaProvider: String, CaseIterable, Codable, Identifiable, Sendable
 
     public var isQuotaTrackingOnly: Bool {
         switch self {
-        case .cursor, .trae, .factoryDroid, .devin, .grok, .openRouter, .amp, .warp:
+        case .cursor, .trae, .factoryDroid, .devin, .grok, .openRouter, .amp, .warp, .muse:
             true
         default:
             false

@@ -16,7 +16,7 @@ final class QuotaFeatureControllerTests: XCTestCase {
             QuotaFeatureController.automaticallyRefreshedProviders(for: .monitor),
             [
                 .codex, .claude, .copilot, .kiro, .glm, .clinePass, .warp,
-                .antigravity, .factoryDroid, .devin, .grok, .openRouter, .amp,
+                .antigravity, .factoryDroid, .devin, .grok, .openRouter, .amp, .muse,
             ]
         )
     }
