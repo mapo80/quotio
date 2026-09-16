@@ -23,15 +23,20 @@ import QuotioDomain
 /// forced refresh, and the previous reading is served while a bound runs.
 public actor MuseQuotaFetcher: QuotaFetching {
   /// One Meta account, as the proxy's auth file describes it.
+  ///
+  /// The token carried here is the Device Client Access token (`dca:…`), which is the
+  /// one the subscription-key endpoint accepts. The `access_token` field of that file
+  /// holds the `LLM|` Model API key instead — same value as `api_key` — and that key
+  /// authenticates model calls, not this endpoint.
   public struct Credential: Sendable, Equatable {
     public let accountKey: String
     public let displayName: String?
-    public let accessToken: String
+    public let dcaToken: String
 
-    public init(accountKey: String, displayName: String?, accessToken: String) {
+    public init(accountKey: String, displayName: String?, dcaToken: String) {
       self.accountKey = accountKey
       self.displayName = displayName
-      self.accessToken = accessToken
+      self.dcaToken = dcaToken
     }
   }
 
@@ -47,8 +52,8 @@ public actor MuseQuotaFetcher: QuotaFetching {
   public static let authFilePrefix = "meta-"
   /// Used when the auth file names no account. Meta issues one credential per login.
   public static let localAccountKey = "Muse Code"
-  /// Meta rejects the subscription-key endpoint without it.
-  public static let apiVersion = "1.0.0"
+  /// Meta's own Muse Code client identifier, as the proxy sends it.
+  public static let userAgent = "muse-code/1.0.2"
   /// Matches the spacing the vendor's own client keeps on this endpoint.
   public static let refreshInterval: TimeInterval = 300
   public static let failureBackoff: TimeInterval = 300
@@ -149,15 +154,18 @@ public actor MuseQuotaFetcher: QuotaFetching {
   }
 
   private func read(_ credential: Credential) async throws -> ProviderQuota {
+    // Same call CLIProxyAPI makes to mint the key (internal/auth/meta/meta.go,
+    // MintAPIKey): the DCA token travels both as the bearer and in the body, under
+    // Meta's own client user agent. The response carries the subscription state, so
+    // reading quota costs an auth-plane POST rather than an inference turn.
     var request = URLRequest(url: keyURL)
     request.httpMethod = "POST"
-    // No `onboard`: this is a read. Onboarding on a poll would change the user's account.
-    request.httpBody = Data("{}".utf8)
-    request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
+    request.httpBody = try? JSONSerialization.data(
+      withJSONObject: ["dca_token": credential.dcaToken])
+    request.setValue("Bearer \(credential.dcaToken)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
-    request.setValue(Self.apiVersion, forHTTPHeaderField: "x-api-version")
-    request.setValue("Quotio", forHTTPHeaderField: "User-Agent")
+    request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
     let (data, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse else {
       throw InfrastructureQuotaFetchError.invalidResponse
@@ -272,7 +280,7 @@ public struct CompositeMuseCredentialSource: MuseCredentialSourcing {
           .init(
             accountKey: account.accountKey,
             displayName: account.displayName,
-            accessToken: credential.accessToken
+            dcaToken: credential.accessToken
           ))
       }
     }
@@ -303,17 +311,20 @@ public extension MuseQuotaFetcher {
     }
   }
 
-  /// Reads one auth file. The `api_key` beside the account token is deliberately
-  /// untouched: it authenticates model calls, which is the proxy's job, not Quotio's.
+  /// Reads one auth file.
+  ///
+  /// Only `dca_token` is taken. `api_key` and `access_token` both hold the `LLM|` Model
+  /// API key, which authenticates model calls — the proxy's job, not Quotio's — and is
+  /// refused by the endpoint read here.
   nonisolated static func credential(from data: Data) -> Credential? {
     guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      let accessToken = trimmed(json["access_token"] as? String)
+      let dcaToken = trimmed(json["dca_token"] as? String)
     else { return nil }
     let email = trimmed((json["email"] as? String)?.lowercased())
     return Credential(
       accountKey: email ?? localAccountKey,
       displayName: email,
-      accessToken: accessToken
+      dcaToken: dcaToken
     )
   }
 }

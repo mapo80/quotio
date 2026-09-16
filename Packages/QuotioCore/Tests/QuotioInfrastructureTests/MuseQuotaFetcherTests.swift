@@ -9,9 +9,9 @@ final class MuseQuotaFetcherTests: XCTestCase {
   /// Shaped like the auth file CLIProxyAPI writes after a Meta login, including the
   /// Model API key this fetcher must leave alone.
   private static let authFile = """
-    {"type":"meta","auth_kind":"oauth","access_token":"meta-account-token",
-    "api_key":"LLM|1234567890|key-material","base_url":"https://api.meta.ai/v1",
-    "email":"Developer@Example.test","name":"Developer"}
+    {"type":"meta","auth_kind":"oauth","access_token":"LLM|1234567890|key-material",
+    "api_key":"LLM|1234567890|key-material","dca_token":"dca:account-token",
+    "base_url":"https://api.meta.ai/v1","email":"Developer@Example.test","name":"Developer"}
     """
   private static let keyResponse = """
     {"api_key":"LLM|1234567890|key-material","is_subs_active":true,
@@ -25,18 +25,21 @@ final class MuseQuotaFetcherTests: XCTestCase {
 
     XCTAssertEqual(credential?.accountKey, "developer@example.test")
     XCTAssertEqual(credential?.displayName, "developer@example.test")
-    XCTAssertEqual(credential?.accessToken, "meta-account-token")
+    XCTAssertEqual(credential?.dcaToken, "dca:account-token")
   }
 
-  func testAnAuthFileWithNoAccountTokenIsNotAnAccount() {
+  /// A file carrying only the Model API key is not an account this fetcher can read:
+  /// that key authenticates model calls and is refused by the subscription endpoint.
+  func testAnAuthFileWithoutADCATokenIsNotAnAccount() {
     XCTAssertNil(
-      MuseQuotaFetcher.credential(from: Data(#"{"type":"meta","api_key":"LLM|1|k"}"#.utf8)))
+      MuseQuotaFetcher.credential(
+        from: Data(#"{"type":"meta","api_key":"LLM|1|k","access_token":"LLM|1|k"}"#.utf8)))
     XCTAssertNil(MuseQuotaFetcher.credential(from: Data("not json".utf8)))
   }
 
   func testAnAuthFileWithoutAnEmailStillYieldsOneAccount() {
     let credential = MuseQuotaFetcher.credential(
-      from: Data(#"{"type":"meta","access_token":"meta-account-token"}"#.utf8))
+      from: Data(#"{"type":"meta","dca_token":"dca:account-token"}"#.utf8))
 
     XCTAssertEqual(credential?.accountKey, MuseQuotaFetcher.localAccountKey)
     XCTAssertNil(credential?.displayName)
@@ -51,7 +54,8 @@ final class MuseQuotaFetcherTests: XCTestCase {
       .write(to: directory.appendingPathComponent("meta-developer-1234.json"))
     try Data(Self.authFile.utf8)
       .write(to: directory.appendingPathComponent("claude-someone.json"))
-    try Data("{}".utf8).write(to: directory.appendingPathComponent("meta-broken.json"))
+    try Data(#"{"type":"meta","api_key":"LLM|1|k"}"#.utf8)
+      .write(to: directory.appendingPathComponent("meta-broken.json"))
 
     let credentials = MuseQuotaFetcher.loadCredentials(directory: directory.path)
 
@@ -62,10 +66,13 @@ final class MuseQuotaFetcherTests: XCTestCase {
     let session = MuseSession { request in
       XCTAssertEqual(request.url?.absoluteString, "https://api.meta.ai/muse-code/key")
       XCTAssertEqual(request.httpMethod, "POST")
+      // The DCA token travels as the bearer and in the body, under Meta's client UA:
+      // the same shape CLIProxyAPI uses to mint the key.
       XCTAssertEqual(
-        request.value(forHTTPHeaderField: "Authorization"), "Bearer meta-account-token")
-      XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-version"), "1.0.0")
-      XCTAssertEqual(request.httpBody, Data("{}".utf8))
+        request.value(forHTTPHeaderField: "Authorization"), "Bearer dca:account-token")
+      XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "muse-code/1.0.2")
+      let sent = try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())
+      XCTAssertEqual(sent as? [String: String], ["dca_token": "dca:account-token"])
       return (Self.keyResponse, 200)
     }
     let fetcher = MuseQuotaFetcher(
@@ -234,7 +241,7 @@ final class MuseQuotaFetcherTests: XCTestCase {
     let monitor = await source.credentials(for: .monitor)
     XCTAssertEqual(
       monitor.map(\.accountKey), ["vaulted@example.test", "developer@example.test"])
-    XCTAssertEqual(monitor.first?.accessToken, "vault-token")
+    XCTAssertEqual(monitor.first?.dcaToken, "vault-token")
 
     let proxy = await source.credentials(for: .localProxy)
     XCTAssertEqual(proxy.map(\.accountKey), ["developer@example.test"])
@@ -248,7 +255,7 @@ final class MuseQuotaFetcherTests: XCTestCase {
     let monitor = await source.credentials(for: .monitor)
 
     XCTAssertEqual(monitor.map(\.accountKey), ["developer@example.test"])
-    XCTAssertEqual(monitor.first?.accessToken, "vault-token")
+    XCTAssertEqual(monitor.first?.dcaToken, "vault-token")
   }
 }
 
