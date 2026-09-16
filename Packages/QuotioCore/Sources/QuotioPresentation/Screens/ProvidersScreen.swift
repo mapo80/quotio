@@ -27,6 +27,7 @@ struct ProvidersScreen: View {
     @State private var isImporterPresented = false
     @State private var selectedProvider: QuotaProvider?
     @State private var showProxyRequiredAlert = false
+    @State private var showMuseDetectionAlert = false
     @State private var showIDEScanSheet = false
     @State private var customProviderSheetMode: CustomProviderSheetMode?
     @State private var showWarpConnectionSheet = false
@@ -44,12 +45,13 @@ struct ProvidersScreen: View {
     private var addableProviders: [QuotaProvider] {
         if modeManager.isLocalProxyMode {
             return QuotaProvider.allCases.filter {
-                ![.factoryDroid, .openRouter, .amp].contains($0) && ($0.supportsManualAuth || $0 == .clinePass)
+                ![.factoryDroid, .openRouter, .amp].contains($0)
+                    && ($0.supportsManualAuth || $0 == .clinePass || $0 == .muse)
             }
         } else {
             return QuotaProvider.allCases.filter {
                 $0.supportsQuotaOnlyMode
-                    && ($0.supportsManualAuth || $0 == .glm || $0 == .clinePass)
+                    && ($0.supportsManualAuth || $0 == .glm || $0 == .clinePass || $0 == .muse)
                     && ($0 != .amp || modeManager.isMonitorMode)
             }
         }
@@ -204,6 +206,14 @@ struct ProvidersScreen: View {
             providersModel.reloadCustomProviders()
             await warpTokens.load()
             await proxyManagement.loadDirectAuthFiles()
+        }
+        .alert("muse.detect.title".localized(), isPresented: $showMuseDetectionAlert) {
+            Button("muse.detect.action".localized()) {
+                Task { await quotaController.refreshAutoDetectedProviders() }
+            }
+            Button("action.cancel".localized(), role: .cancel) {}
+        } message: {
+            Text("muse.detect.message".localized())
         }
         .alert("providers.proxyRequired.title".localized(), isPresented: $showProxyRequiredAlert) {
             Button("action.startProxy".localized()) {
@@ -457,6 +467,13 @@ struct ProvidersScreen: View {
     // MARK: - Helper Functions
 
     private func handleAddProvider(_ provider: QuotaProvider) {
+        // Meta issues the Muse Code credential to its own CLI; Quotio only reads it.
+        // Falling through to the OAuth branch would open a sheet with no endpoint
+        // behind it, so the tile explains the real path instead of pretending to add.
+        if provider == .muse {
+            showMuseDetectionAlert = true
+            return
+        }
         if provider == .clinePass {
             customProviderSheetMode = .add(.clinePass)
             return

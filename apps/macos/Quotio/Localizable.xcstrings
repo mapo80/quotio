@@ -9766,6 +9766,90 @@
         }
       }
     },
+    "muse.detect.action" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Detect now"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Détecter maintenant"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Phát hiện ngay"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "立即检测"
+          }
+        }
+      }
+    },
+    "muse.detect.message" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meta issues the Muse Code credential to its own CLI, so there is nothing to add here. Sign in with \"muse login\" in Terminal and Quotio reads it from your login keychain. Quota is tracked in Monitor Only mode."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meta délivre l'identifiant Muse Code à sa propre CLI : il n'y a rien à ajouter ici. Connectez-vous avec « muse login » dans le Terminal et Quotio le lit depuis votre trousseau. Le quota est suivi en mode Surveillance uniquement."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meta cấp thông tin đăng nhập Muse Code cho CLI của chính họ, nên không có gì để thêm ở đây. Hãy đăng nhập bằng \"muse login\" trong Terminal và Quotio sẽ đọc từ keychain của bạn. Hạn mức được theo dõi ở chế độ Chỉ giám sát."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meta 将 Muse Code 凭据颁发给它自己的 CLI，因此这里无需添加。在终端中使用 \"muse login\" 登录，Quotio 会从你的登录钥匙串中读取。配额在\"仅监控\"模式下跟踪。"
+          }
+        }
+      }
+    },
+    "muse.detect.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muse Code signs in from its own CLI"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muse Code se connecte depuis sa propre CLI"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muse Code đăng nhập từ CLI của chính nó"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muse Code 通过其自带 CLI 登录"
+          }
+        }
+      }
+    },
     "muse.status.inactive" : {
       "localizations" : {
         "en" : {
