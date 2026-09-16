@@ -28,6 +28,7 @@ struct ProvidersScreen: View {
     @State private var selectedProvider: QuotaProvider?
     @State private var showProxyRequiredAlert = false
     @State private var showMuseDetectionAlert = false
+    @State private var showMuseAccessDeniedAlert = false
     @State private var showIDEScanSheet = false
     @State private var customProviderSheetMode: CustomProviderSheetMode?
     @State private var showWarpConnectionSheet = false
@@ -209,11 +210,21 @@ struct ProvidersScreen: View {
         }
         .alert("muse.detect.title".localized(), isPresented: $showMuseDetectionAlert) {
             Button("muse.detect.action".localized()) {
-                Task { await quotaController.refreshAutoDetectedProviders() }
+                Task {
+                    // The keychain prompt can only appear for a user-initiated read.
+                    if await !quotaController.authorizeMuseCredential() {
+                        showMuseAccessDeniedAlert = true
+                    }
+                }
             }
             Button("action.cancel".localized(), role: .cancel) {}
         } message: {
             Text("muse.detect.message".localized())
+        }
+        .alert("muse.detect.denied.title".localized(), isPresented: $showMuseAccessDeniedAlert) {
+            Button("action.ok".localized(), role: .cancel) {}
+        } message: {
+            Text("muse.detect.denied.message".localized())
         }
         .alert("providers.proxyRequired.title".localized(), isPresented: $showProxyRequiredAlert) {
             Button("action.startProxy".localized()) {

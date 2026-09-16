@@ -295,7 +295,8 @@ enum CompositionRoot {
             refreshSettings: refreshSettings,
             menuBarSettings: menuBarSettings,
             notifications: notificationController,
-            authFiles: { [] }
+            authFiles: { [] },
+            museAuthorizer: QuotioInfrastructure.MuseKeychainAuthorizer()
         )
         antigravityAccountScreenModel.setDidSwitchHandler { [weak quotaController] in
             await quotaController?.refresh(provider: .antigravity)

@@ -119,11 +119,52 @@ final class QuotaFeatureControllerTests: XCTestCase {
         await fixture.controller.shutdown()
     }
 
+    func testDetectAsksForKeychainAccessOnceAndReportsARefusal() async {
+        let account = Account.make(
+            providerID: AccountProviderID(rawValue: QuotaProvider.muse.rawValue),
+            accountKey: "developer@example.test",
+            source: .nativeCredential
+        )
+        let granting = MuseAuthorizerStub(result: true)
+        let granted = await makeFixture(
+            account: account, provider: .muse, museAuthorizer: granting
+        )
+        // A user-initiated detect is the only moment allowed to show the system prompt.
+        let grantedResult = await granted.controller.authorizeMuseCredential()
+        XCTAssertTrue(grantedResult)
+        let grantedCalls = await granting.calls()
+        XCTAssertEqual(grantedCalls, 1, "the prompt must not be asked for more than once")
+        await granted.controller.shutdown()
+
+        let refusing = MuseAuthorizerStub(result: false)
+        let denied = await makeFixture(
+            account: account, provider: .muse, museAuthorizer: refusing
+        )
+        let deniedResult = await denied.controller.authorizeMuseCredential()
+        XCTAssertFalse(deniedResult, "a refusal must be reported, not swallowed")
+        await denied.controller.shutdown()
+    }
+
+    func testDetectWithoutAnAuthorizerReportsFailureInsteadOfPretending() async {
+        let account = Account.make(
+            providerID: AccountProviderID(rawValue: QuotaProvider.muse.rawValue),
+            accountKey: "developer@example.test",
+            source: .nativeCredential
+        )
+        let fixture = await makeFixture(account: account, provider: .muse)
+
+        let result = await fixture.controller.authorizeMuseCredential()
+
+        XCTAssertFalse(result)
+        await fixture.controller.shutdown()
+    }
+
     private func makeFixture(
         account: Account,
         provider: QuotaProvider,
         quotaAccountKey: String? = nil,
-        aliases: [String: String] = [:]
+        aliases: [String: String] = [:],
+        museAuthorizer: (any MuseCredentialAuthorizing)? = nil
     ) async -> (
         controller: QuotaFeatureController,
         accountService: QuotaFeatureAccountService,
@@ -164,7 +205,8 @@ final class QuotaFeatureControllerTests: XCTestCase {
                 repository: preferences,
                 delivery: QuotaFeatureNotificationDelivery()
             ),
-            authFiles: { [] }
+            authFiles: { [] },
+            museAuthorizer: museAuthorizer
         )
         return (controller, accountService, quota, menuBar)
     }
@@ -316,5 +358,18 @@ private struct QuotaFeatureFetcher: QuotaFetching {
             credentialAccountKeys: [key],
             accountAliases: aliases
         )
+    }
+}
+
+private actor MuseAuthorizerStub: MuseCredentialAuthorizing {
+    private let result: Bool
+    private var count = 0
+
+    init(result: Bool) { self.result = result }
+    func calls() -> Int { count }
+
+    func authorize() async -> Bool {
+        count += 1
+        return result
     }
 }
