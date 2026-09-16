@@ -25,6 +25,25 @@ public struct ClaudeQuotaCredential: Equatable, Sendable {
     self.expiresAt = expiresAt
     self.allowsRefresh = allowsRefresh
   }
+
+  /// Keeps one credential per account without letting an external read-only
+  /// credential hide a refreshable credential owned by Quotio.
+  static func uniqueByAccountKey(_ credentials: [Self]) -> [Self] {
+    var positions: [String: Int] = [:]
+    var result: [Self] = []
+
+    for credential in credentials {
+      if let index = positions[credential.accountKey] {
+        if credential.allowsRefresh && !result[index].allowsRefresh {
+          result[index] = credential
+        }
+      } else {
+        positions[credential.accountKey] = result.count
+        result.append(credential)
+      }
+    }
+    return result
+  }
 }
 
 public protocol ClaudeQuotaCredentialLoading: Sendable {
@@ -57,10 +76,10 @@ public struct LocalClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading {
   }
 
   public func credentials(for mode: QuotaOperatingMode) async -> [ClaudeQuotaCredential] {
-    var seen = Set<String>()
-    return credentialPaths().compactMap { path in
+    let credentials = credentialPaths().compactMap { path in
       Self.load(path: path, allowsRefresh: allowsRefresh(path: path))
-    }.filter { seen.insert($0.accountKey).inserted }
+    }
+    return ClaudeQuotaCredential.uniqueByAccountKey(credentials)
   }
 
   public func persist(
@@ -97,6 +116,7 @@ public struct LocalClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading {
 
   public static func load(path: String, allowsRefresh: Bool = true) -> ClaudeQuotaCredential? {
     let expanded = NSString(string: path).expandingTildeInPath
+    guard !ClaudeCredentialOwnership.isSymbolicLink(at: expanded) else { return nil }
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return nil }
     return load(data: data, allowsRefresh: allowsRefresh)
   }

@@ -60,7 +60,7 @@ public enum ClaudeCredentialOwnership: Equatable, Sendable {
     return file == cliDirectory || file.hasPrefix(cliDirectory + "/") ? .externalCLI : .quotio
   }
 
-  private static func isSymbolicLink(at path: String, fileManager: FileManager) -> Bool {
+  static func isSymbolicLink(at path: String, fileManager: FileManager = .default) -> Bool {
     let attributes = try? fileManager.attributesOfItem(atPath: path)
     return attributes?[.type] as? FileAttributeType == .typeSymbolicLink
   }

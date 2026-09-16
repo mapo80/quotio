@@ -121,6 +121,18 @@ final class ClaudeCredentialOwnershipTests: XCTestCase {
       ClaudeCredentialOwnership.forAuthFile(at: link.path, environment: [:]), .externalCLI)
   }
 
+  func testCredentialLoaderDoesNotReadSymlinkDestination() throws {
+    let root = try makeTemporaryDirectory()
+    let target = root.appendingPathComponent("credential.json")
+    try Data(
+      #"{"claudeAiOauth":{"accessToken":"linked-access","email":"user@example.com"}}"#.utf8
+    ).write(to: target)
+    let link = root.appendingPathComponent("claude-linked.json")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+    XCTAssertNil(LocalClaudeQuotaCredentialLoader.load(path: link.path))
+  }
+
   // MARK: - Local loader
 
   func testLocalLoaderMarksCLIFileReadOnlyAndLeavesItUnchangedOnPersist() async throws {
@@ -249,6 +261,27 @@ final class ClaudeCredentialOwnershipTests: XCTestCase {
     )
     let swaps = await external.swaps()
     XCTAssertEqual(swaps, 0, "The CLI's keychain item is read, never written back")
+  }
+
+  func testCompositePrefersOwnedCredentialForDuplicateAccountKey() async throws {
+    let externalData = Data(
+      #"{"claudeAiOauth":{"accessToken":"cli-access","email":"user@example.com"}}"#.utf8)
+    let loader = CompositeClaudeQuotaCredentialLoader(
+      local: StaticClaudeLoader([
+        .init(accountKey: "user@example.com", accessToken: "proxy-access")
+      ]),
+      vault: EmptyVault(),
+      metadata: EmptyMetadata(),
+      external: RecordingExternalCredentials(
+        record: ExternalCredentialRecord(data: externalData, account: "Claude Code")),
+      desktop: nil
+    )
+
+    let credentials = await loader.credentials(for: .localProxy)
+
+    XCTAssertEqual(credentials.count, 1)
+    XCTAssertEqual(credentials.first?.accessToken, "proxy-access")
+    XCTAssertEqual(credentials.first?.allowsRefresh, true)
   }
 
   // MARK: - Helpers
