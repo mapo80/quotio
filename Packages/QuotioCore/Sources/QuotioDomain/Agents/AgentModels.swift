@@ -425,6 +425,7 @@ public enum AgentConfigurationInstruction: Equatable, Sendable {
     case codexProxyRemoved
     case codexSaveConfig
     case codexMergeAuthKey
+    case codexSaveModelCatalog
     case codexConfigured
     case codexMergeAndSaveFiles
 

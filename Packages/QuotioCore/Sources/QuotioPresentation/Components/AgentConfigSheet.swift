@@ -337,10 +337,11 @@ struct AgentConfigSheet: View {
         return String(key.prefix(4)) + "••••" + String(key.suffix(4))
     }
     
-    /// Codex writes a single `model` key, so it gets one picker rather than the
-    /// per-tier slots Claude Code needs. Without it the model stays whatever was in
-    /// config.toml, which the proxy may not serve at all — and Codex's own picker
-    /// cannot help, because it does not discover a custom provider's models.
+    /// Codex writes a single `model` key, so it gets one picker rather than the per-tier
+    /// slots Claude Code needs. It decides what Quotio writes into config.toml: without it
+    /// the model stays whatever was there, which the proxy may not serve at all. It is the
+    /// starting point, not the last word — Codex lists the proxy's models in its own picker
+    /// (that is what `CodexModelCatalog` is for) and writes the choice back to the same file.
     private var codexModelSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -378,17 +379,24 @@ struct AgentConfigSheet: View {
                     onRetry: { await viewModel.loadModels(forceRefresh: true) }
                 )
             } else {
-                ModelPickerRow(
-                    label: "agents.codexModel.label".localized(),
-                    selectedModel: viewModel.currentConfiguration?.modelSlots[.sonnet] ?? "",
-                    availableModels: viewModel.availableModels,
-                    preferredFallback: AgentConfiguration.defaultCodexModel,
-                    preferredProvider: "openai",
-                    onModelChange: { model in
-                        // The Codex adapter stores its single model in the sonnet slot.
-                        viewModel.updateModelSlot(.sonnet, model: model)
-                    }
-                )
+                VStack(alignment: .leading, spacing: 6) {
+                    ModelPickerRow(
+                        label: "agents.codexModel.label".localized(),
+                        selectedModel: viewModel.currentConfiguration?.modelSlots[.sonnet] ?? "",
+                        availableModels: viewModel.availableModels,
+                        preferredFallback: AgentConfiguration.defaultCodexModel,
+                        preferredProvider: "openai",
+                        onModelChange: { model in
+                            // The Codex adapter stores its single model in the sonnet slot.
+                            viewModel.updateModelSlot(.sonnet, model: model)
+                        }
+                    )
+
+                    Text("agents.codexModel.hint".localized())
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(14)

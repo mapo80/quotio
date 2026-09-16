@@ -6,6 +6,8 @@
     "agents.models.savedModel" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Currently saved" } }, "fr" : { "stringUnit" : { "state" : "translated", "value" : "Actuellement enregistré" } }, "vi" : { "stringUnit" : { "state" : "translated", "value" : "Đang được lưu" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前已保存" } } } },
     "agents.models.startProxy" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Start Proxy" } }, "fr" : { "stringUnit" : { "state" : "translated", "value" : "Démarrer le proxy" } }, "vi" : { "stringUnit" : { "state" : "translated", "value" : "Khởi động proxy" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "启动代理" } } } },
     "agents.models.retry" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Try Again" } }, "fr" : { "stringUnit" : { "state" : "translated", "value" : "Réessayer" } }, "vi" : { "stringUnit" : { "state" : "translated", "value" : "Thử lại" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } } } },
+    "agents.codex.saveModelCatalog" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Save this model metadata so Codex knows the proxy's models" } }, "fr" : { "stringUnit" : { "state" : "translated", "value" : "Enregistrez ces métadonnées pour que Codex connaisse les modèles du proxy" } }, "vi" : { "stringUnit" : { "state" : "translated", "value" : "Lưu siêu dữ liệu này để Codex biết các mô hình của proxy" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存此模型元数据，让 Codex 知道代理提供的模型" } } } },
+    "agents.codexModel.hint" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "What Codex starts with. You can switch model inside Codex afterwards." } }, "fr" : { "stringUnit" : { "state" : "translated", "value" : "Le modèle avec lequel Codex démarre. Vous pourrez en changer dans Codex ensuite." } }, "vi" : { "stringUnit" : { "state" : "translated", "value" : "Mô hình Codex dùng khi khởi đầu. Sau đó bạn có thể đổi ngay trong Codex." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Codex 启动时使用的模型。之后可以在 Codex 中切换。" } } } },
     "" : {
 
     },
@@ -1910,62 +1912,8 @@
         }
       }
     },
-    "agents.codexModel" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Model"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Modèle"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mô hình"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "模型"
-          }
-        }
-      }
-    },
-    "agents.codexModel.label" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Codex model"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Modèle Codex"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mô hình Codex"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Codex 模型"
-          }
-        }
-      }
-    },
+    "agents.codexModel" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting Model" } }, "fr" : { "stringUnit" : { "state" : "translated", "value" : "Modèle de départ" } }, "vi" : { "stringUnit" : { "state" : "translated", "value" : "Mô hình khởi đầu" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "起始模型" } } } },
+    "agents.codexModel.label" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting model" } }, "fr" : { "stringUnit" : { "state" : "translated", "value" : "Modèle de départ" } }, "vi" : { "stringUnit" : { "state" : "translated", "value" : "Mô hình khởi đầu" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "起始模型" } } } },
     "agents.modelSlots" : {
       "extractionState" : "stale",
       "localizations" : {
