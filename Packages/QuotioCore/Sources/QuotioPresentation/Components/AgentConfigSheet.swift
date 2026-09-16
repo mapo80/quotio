@@ -14,6 +14,7 @@ struct AgentConfigSheet: View {
     
     @Environment(\.dismiss) private var dismiss
     @Environment(PasteboardScreenModel.self) private var pasteboard
+    @Environment(ProxyManagementScreenModel.self) private var proxyManagement
     @State private var previewConfig: AgentConfigResult?
     @State private var showRestoreConfirm = false
     @State private var backupToRestore: AgentBackupFile?
@@ -180,8 +181,7 @@ struct AgentConfigSheet: View {
                         setup: setup,
                         isSelected: viewModel.selectedSetupMode == setup,
                         action: {
-                            viewModel.selectedSetupMode = setup
-                            viewModel.currentConfiguration?.setupMode = setup
+                            Task { await viewModel.selectSetupMode(setup) }
                         }
                     )
                 }
@@ -365,17 +365,31 @@ struct AgentConfigSheet: View {
                 .disabled(viewModel.isFetchingModels)
             }
 
-            ModelPickerRow(
-                label: "agents.codexModel.label".localized(),
-                selectedModel: viewModel.currentConfiguration?.modelSlots[.sonnet] ?? "",
-                availableModels: viewModel.availableModels,
-                preferredFallback: AgentConfiguration.defaultCodexModel,
-                preferredProvider: "openai",
-                onModelChange: { model in
-                    // The Codex adapter stores its single model in the sonnet slot.
-                    viewModel.updateModelSlot(.sonnet, model: model)
-                }
-            )
+            if let failure = viewModel.modelListFailure {
+                ModelListUnavailableView(
+                    failure: failure,
+                    savedModels: viewModel.savedModelSlots.map {
+                        ("agents.codexModel.label".localized(), $0.model)
+                    },
+                    onStartProxy: {
+                        await proxyManagement.startProxy()
+                        await viewModel.loadModelsAfterProxyStart()
+                    },
+                    onRetry: { await viewModel.loadModels(forceRefresh: true) }
+                )
+            } else {
+                ModelPickerRow(
+                    label: "agents.codexModel.label".localized(),
+                    selectedModel: viewModel.currentConfiguration?.modelSlots[.sonnet] ?? "",
+                    availableModels: viewModel.availableModels,
+                    preferredFallback: AgentConfiguration.defaultCodexModel,
+                    preferredProvider: "openai",
+                    onModelChange: { model in
+                        // The Codex adapter stores its single model in the sonnet slot.
+                        viewModel.updateModelSlot(.sonnet, model: model)
+                    }
+                )
+            }
         }
         .padding(14)
         .background(Color(.controlBackgroundColor))
@@ -406,16 +420,28 @@ struct AgentConfigSheet: View {
                 .disabled(viewModel.isFetchingModels)
             }
             
-            VStack(spacing: 8) {
-                ForEach(ModelSlot.allCases) { slot in
-                    ModelSlotRow(
-                        slot: slot,
-                        selectedModel: viewModel.currentConfiguration?.modelSlots[slot] ?? "",
-                        availableModels: viewModel.availableModels,
-                        onModelChange: { model in
-                            viewModel.updateModelSlot(slot, model: model)
-                        }
-                    )
+            if let failure = viewModel.modelListFailure {
+                ModelListUnavailableView(
+                    failure: failure,
+                    savedModels: viewModel.savedModelSlots.map { ($0.slot.displayName, $0.model) },
+                    onStartProxy: {
+                        await proxyManagement.startProxy()
+                        await viewModel.loadModelsAfterProxyStart()
+                    },
+                    onRetry: { await viewModel.loadModels(forceRefresh: true) }
+                )
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(ModelSlot.allCases) { slot in
+                        ModelSlotRow(
+                            slot: slot,
+                            selectedModel: viewModel.currentConfiguration?.modelSlots[slot] ?? "",
+                            availableModels: viewModel.availableModels,
+                            onModelChange: { model in
+                                viewModel.updateModelSlot(slot, model: model)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1121,6 +1147,78 @@ private struct RawConfigView: View {
             .padding(10)
             .background(Color.black.opacity(0.03))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+}
+
+
+/// Shown instead of a model picker when the proxy's roster could not be read.
+///
+/// It states why, keeps the model already saved in the agent's config visible — that
+/// value is on disk and true whether or not the proxy is up — and offers the action that
+/// actually resolves it. What it deliberately does not do is offer a list of models
+/// nobody confirmed are served.
+private struct ModelListUnavailableView: View {
+    let failure: ModelListFailure
+    let savedModels: [(String, String)]
+    let onStartProxy: () async -> Void
+    let onRetry: () async -> Void
+
+    @State private var isWorking = false
+
+    private var message: String {
+        switch failure {
+        case .unreachable: "agents.models.unavailable.proxyStopped".localized()
+        case .emptyRoster: "agents.models.unavailable.emptyRoster".localized()
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !savedModels.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("agents.models.savedModel".localized())
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    ForEach(savedModels, id: \.1) { label, model in
+                        HStack {
+                            Text(label)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 12)
+                            Text(model)
+                                .font(.caption.monospaced())
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                if case .unreachable = failure {
+                    Button("agents.models.startProxy".localized()) {
+                        Task {
+                            isWorking = true
+                            await onStartProxy()
+                            isWorking = false
+                        }
+                    }
+                    .disabled(isWorking)
+                }
+                Button("agents.models.retry".localized()) {
+                    Task {
+                        isWorking = true
+                        await onRetry()
+                        isWorking = false
+                    }
+                }
+                .disabled(isWorking)
+                if isWorking { SmallProgressView() }
+            }
         }
     }
 }
