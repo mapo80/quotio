@@ -87,7 +87,7 @@ public struct CodexAgentConfigurationAdapter: AgentConfigurationRepository {
     private func result(for request: AgentConfigurationRequest, write: Bool) async throws -> AgentConfigResult {
         let configuration = request.configuration
         let managed = CodexConfigurationCodec.managedTOML(
-            model: configuration.modelSlots[.sonnet] ?? "gpt-5-codex",
+            model: configuration.modelSlots[.sonnet] ?? AgentConfiguration.defaultCodexModel,
             proxyURL: configuration.proxyURL,
             reasoningEffort: configuration.codexReasoningEffort
         )

@@ -134,6 +134,7 @@ struct AgentConfigSheet: View {
                 }
 
                 if agent == .codexCLI {
+                    codexModelSection
                     reasoningEffortSection
                 }
 
@@ -336,6 +337,51 @@ struct AgentConfigSheet: View {
         return String(key.prefix(4)) + "••••" + String(key.suffix(4))
     }
     
+    /// Codex writes a single `model` key, so it gets one picker rather than the
+    /// per-tier slots Claude Code needs. Without it the model stays whatever was in
+    /// config.toml, which the proxy may not serve at all — and Codex's own picker
+    /// cannot help, because it does not discover a custom provider's models.
+    private var codexModelSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("agents.codexModel".localized())
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+
+                Spacer()
+
+                Button {
+                    Task { await viewModel.loadModels(forceRefresh: true) }
+                } label: {
+                    if viewModel.isFetchingModels {
+                        SmallProgressView()
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.caption)
+                    }
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh models from proxy".localized())
+                .disabled(viewModel.isFetchingModels)
+            }
+
+            ModelPickerRow(
+                label: "agents.codexModel.label".localized(),
+                selectedModel: viewModel.currentConfiguration?.modelSlots[.sonnet] ?? "",
+                availableModels: viewModel.availableModels,
+                preferredFallback: AgentConfiguration.defaultCodexModel,
+                preferredProvider: "openai",
+                onModelChange: { model in
+                    // The Codex adapter stores its single model in the sonnet slot.
+                    viewModel.updateModelSlot(.sonnet, model: model)
+                }
+            )
+        }
+        .padding(14)
+        .background(Color(.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
     private var modelSlotsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -894,35 +940,67 @@ private struct ModelSlotRow: View {
     let selectedModel: String
     let availableModels: [AvailableModel]
     let onModelChange: (String) -> Void
-    
+
+    var body: some View {
+        ModelPickerRow(
+            label: slot.displayName,
+            selectedModel: selectedModel,
+            availableModels: availableModels,
+            preferredFallback: AvailableModel.defaultModels[slot]?.name,
+            preferredProvider: nil,
+            onModelChange: onModelChange
+        )
+    }
+}
+
+/// One labelled model picker, grouped by provider.
+///
+/// Shared by Claude Code's per-tier slots and Codex's single model so both resolve a
+/// selection the same way: keep what is configured when the proxy still serves it, fall
+/// back to the caller's preference when it does not, and to the first model on offer
+/// otherwise. A configured model the proxy no longer serves would silently fail at the
+/// agent, so it is corrected here — and still only written when the user applies.
+private struct ModelPickerRow: View {
+    let label: String
+    let selectedModel: String
+    let availableModels: [AvailableModel]
+    let preferredFallback: String?
+    /// Owner to prefer when neither the configured model nor the fallback is served.
+    /// Codex is OpenAI's agent, so an OpenAI-owned model is the least surprising
+    /// substitute; without it the first model in the list wins, which is whatever the
+    /// proxy happens to sort first — a Claude id offered to Codex.
+    let preferredProvider: String?
+    let onModelChange: (String) -> Void
+
     private var effectiveSelection: String {
-        // Check if selected model exists in available list
         if !selectedModel.isEmpty && availableModels.contains(where: { $0.name == selectedModel }) {
             return selectedModel
         }
-        // Check if default model is available
-        if let defaultModel = AvailableModel.defaultModels[slot],
-           availableModels.contains(where: { $0.name == defaultModel.name }) {
-            return defaultModel.name
+        if let preferredFallback,
+           availableModels.contains(where: { $0.name == preferredFallback }) {
+            return preferredFallback
         }
-        // Final fallback to first available model
+        if let preferredProvider,
+           let sameFamily = availableModels.first(where: { $0.provider == preferredProvider }) {
+            return sameFamily.name
+        }
         return availableModels.first?.name ?? ""
     }
-    
+
     var body: some View {
         HStack {
-            Text(slot.displayName)
+            Text(label)
                 .font(.caption)
                 .fontWeight(.medium)
-            
+
             Spacer(minLength: 12)
-            
+
             Picker("", selection: Binding(
                 get: { effectiveSelection },
                 set: { onModelChange($0) }
             )) {
                 let providers = Set(availableModels.map { $0.provider }).sorted()
-                
+
                 ForEach(providers, id: \.self) { provider in
                     Section(header: Text(provider.capitalized)) {
                         ForEach(availableModels.filter { $0.provider == provider }) { model in
@@ -936,7 +1014,6 @@ private struct ModelSlotRow: View {
             .frame(maxWidth: 280)
         }
         .onAppear {
-            // Trigger fallback update if model is empty or not in available list
             if selectedModel.isEmpty || !availableModels.contains(where: { $0.name == selectedModel }) {
                 onModelChange(effectiveSelection)
             }
