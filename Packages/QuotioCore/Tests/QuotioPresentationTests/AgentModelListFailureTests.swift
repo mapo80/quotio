@@ -237,3 +237,49 @@ private actor RecordingAgentService: AgentModelCatalogRepository {
     ConnectionTestResult(success: true, message: .connected, latencyMs: nil, modelResponded: nil)
   }
 }
+
+/// The picker is on screen before the proxy answers. What it shows and what it saves are
+/// two different questions while that is true.
+final class ProxyModelSelectionTests: XCTestCase {
+  private let roster = [
+    AvailableModel(id: "muse-spark-1.3", name: "muse-spark-1.3", provider: "meta", isDefault: false),
+    AvailableModel(id: "gpt-5-codex", name: "gpt-5-codex", provider: "openai", isDefault: false),
+  ]
+
+  func testNothingIsSavedWhileTheRosterIsStillEmpty() {
+    let adopted = ProxyModelSelection.adoption(
+      for: "muse-spark-1.3", from: [], preferredFallback: "gpt-5-codex", preferredProvider: "openai")
+
+    XCTAssertNil(adopted, "clearing the saved model would leave a setup that cannot be saved")
+  }
+
+  func testAModelTheProxyDoesNotServeIsReplacedOnceTheRosterArrives() {
+    let adopted = ProxyModelSelection.adoption(
+      for: "gpt-4-turbo", from: roster, preferredFallback: "gpt-5-codex", preferredProvider: "openai")
+
+    XCTAssertEqual(adopted, "gpt-5-codex")
+  }
+
+  func testAModelTheProxyServesIsLeftAlone() {
+    let adopted = ProxyModelSelection.adoption(
+      for: "muse-spark-1.3", from: roster, preferredFallback: "gpt-5-codex", preferredProvider: "openai")
+
+    XCTAssertNil(adopted)
+  }
+
+  func testAnEmptySlotTakesTheFallbackTheProxyServes() {
+    let adopted = ProxyModelSelection.adoption(
+      for: "", from: roster, preferredFallback: "gpt-5-codex", preferredProvider: "openai")
+
+    XCTAssertEqual(adopted, "gpt-5-codex")
+  }
+
+  func testWithoutTheFallbackTheOwnerDecidesTheSubstitute() {
+    let onlyMeta = [roster[0]]
+    XCTAssertEqual(
+      ProxyModelSelection.adoption(
+        for: "", from: onlyMeta, preferredFallback: "gpt-5-codex", preferredProvider: "openai"),
+      "muse-spark-1.3",
+      "with no OpenAI model served, the one model there is wins")
+  }
+}

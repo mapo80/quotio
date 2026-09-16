@@ -87,8 +87,22 @@ public actor MuseQuotaFetcher: QuotaFetching {
     }
     let keys = Set(all.map(\.accountKey))
     var quotas: [String: ProviderQuota] = [:]
+    var failure: (any Error)?
     for credential in all where Self.includes(credential.accountKey, in: request.scope) {
-      if let quota = await quota(for: credential) { quotas[credential.accountKey] = quota }
+      switch await quota(for: credential) {
+      case .success(let quota):
+        if let quota { quotas[credential.accountKey] = quota }
+      case .failure(let error):
+        failure = failure ?? error
+      }
+    }
+    // A read that failed with nothing cached to serve has to be reported. Returning an
+    // empty result instead reads as a successful refresh: the account shows neither a
+    // quota nor a reason, and the backoff keeps it that way until it elapses. With a
+    // reading already in hand — for this account or another one — the failure is the
+    // backoff's business, and what was read stays on screen.
+    if quotas.isEmpty, let failure {
+      throw failure
     }
     return .init(
       quotas: quotas, credentialAvailability: .present, credentialAccountKeys: keys)
@@ -134,22 +148,25 @@ public actor MuseQuotaFetcher: QuotaFetching {
       models: metrics, lastUpdated: now, planType: plan, accountDisplayName: displayName)
   }
 
-  private func quota(for credential: Credential) async -> ProviderQuota? {
+  private func quota(for credential: Credential) async -> Result<ProviderQuota?, any Error> {
     let at = now()
-    if let cached = cache[credential.accountKey], at < cached.readyAt { return cached.quota }
+    if let cached = cache[credential.accountKey], at < cached.readyAt {
+      return .success(cached.quota)
+    }
     do {
       let quota = try await read(credential)
       cache[credential.accountKey] = CachedQuota(
         quota: quota, readyAt: at.addingTimeInterval(Self.refreshInterval))
-      return quota
+      return .success(quota)
     } catch {
       // Every failure backs off, expired credentials included: the account token cannot
       // be refreshed from here, so retrying it on the next poll only spends rate limit.
-      // The last good reading keeps being served while the backoff runs.
+      // The last good reading keeps being served while the backoff runs; with nothing
+      // read yet the failure travels up instead, so it can be shown.
       let previous = cache[credential.accountKey]?.quota
       cache[credential.accountKey] = CachedQuota(
         quota: previous, readyAt: at.addingTimeInterval(Self.failureBackoff))
-      return previous
+      return previous.map { Result.success($0) } ?? .failure(error)
     }
   }
 

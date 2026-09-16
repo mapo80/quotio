@@ -136,7 +136,10 @@ public struct CodexAgentConfigurationAdapter: AgentConfigurationRepository {
         var backupPath: String?
         if write {
             let backups = try await fileStore.apply([
-                AgentFileWrite(path: configPath, data: Data(config.utf8)),
+                // The proxy's API key now lives in this file, so it gets the same
+                // owner-only permissions auth.json has; left alone, an existing config
+                // keeps whatever it had (commonly 0644) and a new one follows the umask.
+                AgentFileWrite(path: configPath, data: Data(config.utf8), permissions: 0o600),
                 AgentFileWrite(path: authPath, data: auth.merged, permissions: 0o600),
                 AgentFileWrite(path: catalogPath, data: catalog),
             ])

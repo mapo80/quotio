@@ -111,6 +111,28 @@ final class CodexMuseHandoffTests: XCTestCase {
         XCTAssertTrue(config.contains(#"experimental_bearer_token = "quotio-local-key""#))
     }
 
+    /// config.toml now carries the proxy's API key, so it must not be left readable by
+    /// other accounts on the machine the way a fresh file otherwise would be.
+    func testTheConfigCarryingTheKeyIsWrittenOwnerOnly() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-perms-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let adapter = CodexAgentConfigurationAdapter(fileStore: AgentFileStore(homeDirectory: home.path))
+        var configuration = AgentConfiguration(
+            agent: .codexCLI,
+            proxyURL: "http://127.0.0.1:8317/v1",
+            apiKey: "quotio-local-key"
+        )
+        configuration.modelSlots[.sonnet] = "muse-spark-1.3"
+
+        _ = try await adapter.apply(AgentConfigurationRequest(configuration: configuration, mode: .automatic))
+
+        let config = home.appendingPathComponent(".codex/config.toml")
+        let permissions = try FileManager.default.attributesOfItem(atPath: config.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
+    }
+
     func testWithoutARosterTheCatalogStillCoversTheModelBeingConfigured() throws {
         let entries = try models(in: CodexModelCatalog.json(models: ["muse-spark-1.3"]))
         XCTAssertEqual(entries.count, 1)

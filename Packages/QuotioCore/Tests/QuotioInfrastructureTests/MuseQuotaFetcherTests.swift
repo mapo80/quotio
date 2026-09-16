@@ -213,6 +213,20 @@ final class MuseQuotaFetcherTests: XCTestCase {
     XCTAssertEqual(afterWindow, 2)
   }
 
+  /// With nothing read yet there is no reading to fall back on, and an empty answer
+  /// would be taken for a successful refresh: the account would show neither a quota nor
+  /// a reason until the backoff elapsed.
+  func testAFirstReadThatFailsIsReportedRatherThanReturnedEmpty() async {
+    let session = MuseSession { _ in (Self.keyResponse, 200) }
+    await session.fail(true)
+    let fetcher = MuseQuotaFetcher(credentials: MuseSource(Self.authFile), session: session)
+
+    do {
+      let output = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
+      XCTFail("expected the failure to travel up, got \(output.quotas)")
+    } catch {}
+  }
+
   func testAFailureBacksOffAndKeepsServingTheLastGoodReading() async throws {
     let clock = MuseClock(Date(timeIntervalSince1970: 1_788_000_000))
     let session = MuseSession { _ in (Self.keyResponse, 200) }

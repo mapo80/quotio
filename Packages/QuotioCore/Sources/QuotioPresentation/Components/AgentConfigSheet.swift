@@ -1007,18 +1007,12 @@ private struct ModelPickerRow: View {
     let onModelChange: (String) -> Void
 
     private var effectiveSelection: String {
-        if !selectedModel.isEmpty && availableModels.contains(where: { $0.name == selectedModel }) {
-            return selectedModel
-        }
-        if let preferredFallback,
-           availableModels.contains(where: { $0.name == preferredFallback }) {
-            return preferredFallback
-        }
-        if let preferredProvider,
-           let sameFamily = availableModels.first(where: { $0.provider == preferredProvider }) {
-            return sameFamily.name
-        }
-        return availableModels.first?.name ?? ""
+        ProxyModelSelection.shown(
+            for: selectedModel,
+            from: availableModels,
+            preferredFallback: preferredFallback,
+            preferredProvider: preferredProvider
+        )
     }
 
     var body: some View {
@@ -1047,11 +1041,71 @@ private struct ModelPickerRow: View {
             .pickerStyle(.menu)
             .frame(maxWidth: 280)
         }
-        .onAppear {
-            if selectedModel.isEmpty || !availableModels.contains(where: { $0.name == selectedModel }) {
-                onModelChange(effectiveSelection)
-            }
+        .onAppear { adoptSelectionIfNeeded() }
+        // The roster usually arrives after this row is on screen. Without this the row
+        // would show the substitute it computed while the list was empty and leave the
+        // slot holding a model the proxy does not serve.
+        .onChange(of: availableModels.map(\.name)) { _, _ in adoptSelectionIfNeeded() }
+    }
+
+    private func adoptSelectionIfNeeded() {
+        if let adopted = ProxyModelSelection.adoption(
+            for: selectedModel,
+            from: availableModels,
+            preferredFallback: preferredFallback,
+            preferredProvider: preferredProvider
+        ) {
+            onModelChange(adopted)
         }
+    }
+}
+
+/// Which model a picker shows, and which one it writes back.
+///
+/// The two differ while the roster is still loading: the row is on screen before the
+/// proxy answers, and with nothing to judge the saved model against there is no
+/// substitute worth adopting. Writing one then would clear the model the configuration
+/// already holds, leaving a setup that cannot be saved while the picker still displays
+/// a model — so the decision lives here, where it can be tested.
+enum ProxyModelSelection {
+    /// The model to display: the saved one when the proxy serves it, else the closest
+    /// substitute among the models it does serve.
+    static func shown(
+        for selected: String,
+        from available: [AvailableModel],
+        preferredFallback: String?,
+        preferredProvider: String?
+    ) -> String {
+        if !selected.isEmpty && available.contains(where: { $0.name == selected }) {
+            return selected
+        }
+        if let preferredFallback, available.contains(where: { $0.name == preferredFallback }) {
+            return preferredFallback
+        }
+        if let preferredProvider,
+           let sameFamily = available.first(where: { $0.provider == preferredProvider }) {
+            return sameFamily.name
+        }
+        return available.first?.name ?? ""
+    }
+
+    /// The model to write into the configuration, or nil to leave it as it is.
+    static func adoption(
+        for selected: String,
+        from available: [AvailableModel],
+        preferredFallback: String?,
+        preferredProvider: String?
+    ) -> String? {
+        guard !available.isEmpty else { return nil }
+        guard selected.isEmpty || !available.contains(where: { $0.name == selected }) else {
+            return nil
+        }
+        return shown(
+            for: selected,
+            from: available,
+            preferredFallback: preferredFallback,
+            preferredProvider: preferredProvider
+        )
     }
 }
 
