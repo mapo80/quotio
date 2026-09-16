@@ -91,33 +91,59 @@ final class MuseQuotaFetcherTests: XCTestCase {
     }
   }
 
-  func testCarriesAWindowOfAnotherDurationUnderItsOwnNameInsteadOfTheSessionSlot() throws {
+  func testCarriesAWindowOfAnotherDurationUnderItsOwnNameInsteadOfTheSessionSlot() {
     let usage: [String: Any] = [
       "window": ["used_percent": 25, "resets_at": 1_788_431_188, "window_duration_mins": 600]
     ]
-    let quota = try XCTUnwrap(
-      MuseQuotaFetcher.mapUsage(
-        usage, plan: nil, displayName: nil, now: Date(timeIntervalSince1970: 1_788_000_000)))
+    let quota = MuseQuotaFetcher.mapUsage(
+      usage, plan: nil, displayName: nil, now: Date(timeIntervalSince1970: 1_788_000_000))
 
-    XCTAssertEqual(quota.models.map(\.name), ["muse-window-600"])
+    XCTAssertEqual(quota.models.map(\.name), ["muse-window-600", "muse-weekly"])
     XCTAssertEqual(quota.models.first?.percentage, 75)
   }
 
-  func testAWindowWithNoDeclaredDurationStaysTheSessionWindow() throws {
-    let quota = try XCTUnwrap(
-      MuseQuotaFetcher.mapUsage(
-        ["window": ["used_percent": 0]], plan: nil, displayName: nil,
-        now: Date(timeIntervalSince1970: 1_788_000_000)))
+  func testAWindowWithNoDeclaredDurationStaysTheSessionWindow() {
+    let quota = MuseQuotaFetcher.mapUsage(
+      ["window": ["used_percent": 0]], plan: nil, displayName: nil,
+      now: Date(timeIntervalSince1970: 1_788_000_000))
 
-    XCTAssertEqual(quota.models.map(\.name), ["muse-session"])
+    XCTAssertEqual(quota.models.map(\.name), ["muse-session", "muse-weekly"])
     XCTAssertEqual(quota.models.first?.resetTime, "")
   }
 
-  func testUsageWithNoReadableWindowProducesNoQuotaRow() {
-    XCTAssertNil(
-      MuseQuotaFetcher.mapUsage(
-        ["window": ["resets_at": 1_788_431_188]], plan: "Muse Code Pro", displayName: nil,
-        now: Date(timeIntervalSince1970: 1_788_000_000)))
+  /// A window whose only readable field is its reset time still reports Unknown, not a
+  /// fetch failure: `percentage < 0` is this app's existing "unknown" sentinel, rendered
+  /// as unavailable by the presentation layer.
+  func testAWindowWithNoReadablePercentageIsUnknownRatherThanOmitted() {
+    let quota = MuseQuotaFetcher.mapUsage(
+      ["window": ["resets_at": 1_788_431_188]], plan: "Muse Code Pro", displayName: nil,
+      now: Date(timeIntervalSince1970: 1_788_000_000))
+
+    XCTAssertEqual(quota.models.map(\.name), ["muse-session", "muse-weekly"])
+    XCTAssertEqual(quota.models[0].percentage, -1)
+    XCTAssertEqual(quota.planType, "Muse Code Pro")
+  }
+
+  /// Reproduces the real response of an active "Muse Code High Usage" subscription,
+  /// measured live 2026-09-16: `is_subs_active: true` with no `subs_usage` object at
+  /// all. Meta appears to only attach it around a mint, not on every read. The account
+  /// and plan were read correctly and must not be reported as a fetch failure.
+  func testAnActiveSubscriptionWithNoSubsUsageReportsUnknownWindowsNotAFailure() async throws {
+    let body = """
+      {"api_key":"LLM|1234567890|key-material","is_subs_active":true,
+      "subs_tier_name":"Muse Code High Usage","user_email":"user@example.test"}
+      """
+    let fetcher = MuseQuotaFetcher(
+      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
+      session: MuseSession { _ in (body, 200) },
+      now: { Date(timeIntervalSince1970: 1_788_000_000) })
+
+    let output = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
+    let quota = try XCTUnwrap(output.quotas["developer@example.test"])
+
+    XCTAssertEqual(quota.planType, "Muse Code High Usage")
+    XCTAssertEqual(quota.models.map(\.name), ["muse-session", "muse-weekly"])
+    XCTAssertTrue(quota.models.allSatisfy { $0.percentage < 0 })
   }
 
   func testInactiveSubscriptionReportsAStatusInsteadOfInventedWindows() async throws {

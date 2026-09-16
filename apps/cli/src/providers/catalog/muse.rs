@@ -30,7 +30,13 @@ const KEYCHAIN_ACCOUNT: &str = "meta";
 const API_VERSION: &str = "1.0.0";
 /// Meta's rolling window, identified by its declared duration rather than assumed.
 const FIVE_HOUR_WINDOW_MINS: f64 = 300.0;
-const NATIVE_READ_TIMEOUT: Duration = Duration::from_secs(1);
+/// Measured live (2026-09-16) against this Keychain item: the first read of any
+/// process's lifetime took 4.68s before returning successfully, then 4ms on every read
+/// after — a one-time authorization-evaluation cost, not a per-call one. Cursor's and
+/// Grok's shared 1s budget (oauth_editors.rs) is tuned for their own items and is too
+/// tight for this one; kept as a separate constant so raising it cannot change their
+/// behavior.
+const NATIVE_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub const DEFINITIONS: &[Definition] = &[Definition {
     id: "muse",
@@ -77,10 +83,17 @@ async fn fetch_muse_at(
 
 fn usage(root: &Value, key: &Secret, now: OffsetDateTime) -> Result<ProviderUsage, ProviderError> {
     let active = root.get("is_subs_active").and_then(Value::as_bool);
-    let (windows, diagnostics) = windows(root.get("subs_usage"), now)?;
-    if windows.is_empty() && active != Some(false) {
-        return Err(ProviderError::InvalidData);
-    }
+    // A confirmed-inactive subscription reports its state instead of inventing windows;
+    // anything else builds both fixed windows even when Meta's response carries neither.
+    // Measured live against a real, active "Muse Code High Usage" subscription: the
+    // subscription-key endpoint answered is_subs_active: true with no subs_usage object
+    // at all. Meta appears to only attach it around a mint, not on every read, so that
+    // shape is a normal "not observed yet" state, not a fetch failure.
+    let (windows, diagnostics) = if active == Some(false) {
+        (Vec::new(), Vec::new())
+    } else {
+        windows(root.get("subs_usage"), now)?
+    };
     let mut account = common::account_identity("muse", key, "cli-oauth");
     account.label = "Muse Code subscription".into();
     account.plan = text(root.get("subs_tier_name"), 128);
@@ -101,6 +114,12 @@ fn usage(root: &Value, key: &Secret, now: OffsetDateTime) -> Result<ProviderUsag
 
 /// Reads the rolling and weekly windows.
 ///
+/// Always returns both, even when `usage` is absent or carries neither sub-object: a
+/// window with no readable percentage is reported as `Quota::Unknown`, this codebase's
+/// existing "not observed" state (see e.g. `grok_windows`'s fixed pair below), rather
+/// than omitted. Omitting it would read as "this account has no such window" instead of
+/// "this read did not carry it".
+///
 /// A window whose declared duration is not the five-hour one is carried under its own
 /// label rather than filed as the session window: reporting a longer window as the
 /// five-hour one would understate usage by the ratio between them.
@@ -108,11 +127,7 @@ fn windows(
     usage: Option<&Value>,
     now: OffsetDateTime,
 ) -> Result<(Vec<QuotaWindow>, Vec<UsageDiagnostic>), ProviderError> {
-    let mut windows = Vec::new();
     let mut diagnostics = Vec::new();
-    let Some(usage) = usage.filter(|v| v.is_object()) else {
-        return Ok((windows, diagnostics));
-    };
     let mut read = |value: Option<&Value>, source: &str| match value.map(percentage) {
         Some(Ok(value)) => value,
         Some(Err(code)) => {
@@ -125,34 +140,37 @@ fn windows(
         None => None,
     };
 
-    if let Some(session) = usage.get("window").filter(|v| v.is_object()) {
-        let used = read(session.get("used_percent"), "muse_window");
-        let minutes = common::number(session.get("window_duration_mins"))?;
-        let (id, label) = match minutes {
-            None | Some(FIVE_HOUR_WINDOW_MINS) => ("muse-session".to_owned(), "Session".to_owned()),
-            Some(minutes) => (
-                format!("muse-window-{}", minutes as i64),
-                duration_label(minutes),
-            ),
-        };
-        windows.push(percent_window(
-            &label,
-            &id,
-            used,
-            common::date(session.get("resets_at"))?,
-            now,
-        )?);
-    }
-    if let Some(weekly) = usage.get("weekly").filter(|v| v.is_object()) {
-        let used = read(weekly.get("used_percent"), "muse_weekly");
-        windows.push(percent_window(
-            "Weekly",
-            "muse-weekly",
-            used,
-            common::date(weekly.get("resets_at"))?,
-            now,
-        )?);
-    }
+    let session = usage
+        .and_then(|u| u.get("window"))
+        .filter(|v| v.is_object());
+    let used = read(session.and_then(|s| s.get("used_percent")), "muse_window");
+    let minutes = common::number(session.and_then(|s| s.get("window_duration_mins")))?;
+    let (id, label) = match minutes {
+        None | Some(FIVE_HOUR_WINDOW_MINS) => ("muse-session".to_owned(), "Session".to_owned()),
+        Some(minutes) => (
+            format!("muse-window-{}", minutes as i64),
+            duration_label(minutes),
+        ),
+    };
+    let mut windows = vec![percent_window(
+        &label,
+        &id,
+        used,
+        common::date(session.and_then(|s| s.get("resets_at")))?,
+        now,
+    )?];
+
+    let weekly = usage
+        .and_then(|u| u.get("weekly"))
+        .filter(|v| v.is_object());
+    let used = read(weekly.and_then(|w| w.get("used_percent")), "muse_weekly");
+    windows.push(percent_window(
+        "Weekly",
+        "muse-weekly",
+        used,
+        common::date(weekly.and_then(|w| w.get("resets_at")))?,
+        now,
+    )?);
     Ok((windows, diagnostics))
 }
 
@@ -398,16 +416,72 @@ mod tests {
         assert_eq!(usage.account.plan.as_deref(), Some("Muse Code Free"));
     }
 
+    /// Reproduces the real response of an active "Muse Code High Usage" subscription,
+    /// measured live 2026-09-16: `is_subs_active: true` with no `subs_usage` object at
+    /// all. Meta appears to only attach it around a mint, not on every read. Both fixed
+    /// windows must still be reported, as Unknown rather than as a fetch failure — the
+    /// account and plan were read correctly.
     #[test]
-    fn an_active_subscription_without_readable_usage_is_a_data_error() {
-        assert!(matches!(
-            usage(
-                &json!({"is_subs_active": true, "subs_usage": {}}),
-                &key(),
-                OffsetDateTime::UNIX_EPOCH
-            ),
-            Err(ProviderError::InvalidData)
-        ));
+    fn an_active_subscription_with_no_subs_usage_reports_unknown_windows_not_an_error() {
+        let usage = usage(
+            &json!({
+                "is_subs_active": true,
+                "subs_tier_name": "Muse Code High Usage",
+                "user_email": "user@example.test"
+            }),
+            &key(),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        assert_eq!(usage.account.subscription_status.as_deref(), Some("active"));
+        assert_eq!(usage.account.plan.as_deref(), Some("Muse Code High Usage"));
+        assert_eq!(
+            usage
+                .windows
+                .iter()
+                .map(|w| w.metric_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["muse-session", "muse-weekly"]
+        );
+        assert!(usage.windows.iter().all(|w| w.quota == Quota::Unknown));
+        assert!(
+            usage.diagnostics.is_empty(),
+            "an absent field is not malformed data"
+        );
+    }
+
+    #[test]
+    fn an_active_subscription_with_an_empty_subs_usage_object_is_the_same_as_absent() {
+        let usage = usage(
+            &json!({"is_subs_active": true, "subs_usage": {}}),
+            &key(),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        assert!(usage.windows.iter().all(|w| w.quota == Quota::Unknown));
+    }
+
+    #[test]
+    fn one_window_present_and_the_other_absent_are_reported_independently() {
+        let usage = usage(
+            &json!({
+                "is_subs_active": true,
+                "subs_usage": {"weekly": {"used_percent": 10, "resets_at": 1_788_739_200}}
+            }),
+            &key(),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        assert_eq!(
+            usage.windows[0].quota,
+            Quota::Unknown,
+            "session was not reported"
+        );
+        assert_eq!(usage.windows[1].quota, Quota::from_remaining(Some(90.0)));
+        assert!(usage.windows[1].resets_at.is_some());
     }
 
     #[test]

@@ -110,6 +110,14 @@ public actor MuseQuotaFetcher: QuotaFetching {
 
   /// Turns Meta's `subs_usage` object into the rolling and weekly windows Quotio renders.
   ///
+  /// Always returns both windows, even when Meta's response carries neither: measured
+  /// live against a real, active "Muse Code High Usage" subscription, the subscription-key
+  /// endpoint answered `is_subs_active: true` with no `subs_usage` object at all — Meta
+  /// appears to only attach it around a mint, not on every read. A window with no
+  /// readable percentage renders as unavailable (percentage < 0 is this app's existing
+  /// "unknown" sentinel); it must not be reported as a fetch failure, since the account
+  /// and plan are valid and were read correctly.
+  ///
   /// A window whose declared duration is not the five-hour one is carried under its own
   /// name rather than filed as the session window: reporting a longer window as the
   /// five-hour one would understate usage by the ratio between them, and would do it
@@ -119,27 +127,23 @@ public actor MuseQuotaFetcher: QuotaFetching {
     plan: String?,
     displayName: String?,
     now: Date
-  ) -> ProviderQuota? {
-    var metrics: [QuotaMetric] = []
-    if let window = usage["window"] as? [String: Any],
-      let remaining = remainingPercentage(window["used_percent"])
-    {
-      let minutes = number(window["window_duration_mins"])
-      let name =
-        minutes == fiveHourWindowMinutes || minutes == nil
-        ? "muse-session" : "muse-window-\(Int(minutes ?? 0))"
-      metrics.append(
-        .init(
-          name: name, percentage: remaining, resetTime: resetTime(window["resets_at"])))
-    }
-    if let weekly = usage["weekly"] as? [String: Any],
-      let remaining = remainingPercentage(weekly["used_percent"])
-    {
-      metrics.append(
-        .init(
-          name: "muse-weekly", percentage: remaining, resetTime: resetTime(weekly["resets_at"])))
-    }
-    guard !metrics.isEmpty else { return nil }
+  ) -> ProviderQuota {
+    let session = usage["window"] as? [String: Any]
+    let minutes = number(session?["window_duration_mins"])
+    let sessionName =
+      minutes == fiveHourWindowMinutes || minutes == nil
+      ? "muse-session" : "muse-window-\(Int(minutes ?? 0))"
+    let weekly = usage["weekly"] as? [String: Any]
+    let metrics: [QuotaMetric] = [
+      .init(
+        name: sessionName,
+        percentage: remainingPercentage(session?["used_percent"]) ?? -1,
+        resetTime: resetTime(session?["resets_at"])),
+      .init(
+        name: "muse-weekly",
+        percentage: remainingPercentage(weekly?["used_percent"]) ?? -1,
+        resetTime: resetTime(weekly?["resets_at"])),
+    ]
     return ProviderQuota(
       models: metrics, lastUpdated: now, planType: plan, accountDisplayName: displayName)
   }
@@ -212,12 +216,8 @@ public actor MuseQuotaFetcher: QuotaFetching {
         accountDisplayName: display
       )
     }
-    guard let usage = body["subs_usage"] as? [String: Any],
-      let quota = Self.mapUsage(usage, plan: plan, displayName: display, now: now())
-    else {
-      throw InfrastructureQuotaFetchError.invalidResponse
-    }
-    return quota
+    let usage = body["subs_usage"] as? [String: Any] ?? [:]
+    return Self.mapUsage(usage, plan: plan, displayName: display, now: now())
   }
 
   /// The keychain payload also holds the Model API key; it is deliberately not read.
