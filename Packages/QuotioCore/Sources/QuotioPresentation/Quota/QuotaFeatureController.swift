@@ -21,12 +21,11 @@ public final class QuotaFeatureController {
     @ObservationIgnored private let menuBarSettings: MenuBarSettingsManager
     @ObservationIgnored private let notifications: any NotificationRequesting
     @ObservationIgnored private var authFiles: () -> [ManagedAuthFile]
-    @ObservationIgnored private let museAuthorizer: (any MuseCredentialAuthorizing)?
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var didChangeHandler: (@MainActor () -> Void)?
 
     private static let localProxyProviders: Set<QuotaProvider> = [
-        .claude, .codex, .antigravity, .kiro, .copilot, .glm, .warp, .clinePass,
+        .claude, .codex, .antigravity, .kiro, .copilot, .glm, .warp, .clinePass, .muse,
     ]
 
     private static let monitorProviders: Set<QuotaProvider> = [
@@ -50,8 +49,7 @@ public final class QuotaFeatureController {
         refreshSettings: RefreshSettingsManager,
         menuBarSettings: MenuBarSettingsManager,
         notifications: any NotificationRequesting,
-        authFiles: @escaping () -> [ManagedAuthFile],
-        museAuthorizer: (any MuseCredentialAuthorizing)? = nil
+        authFiles: @escaping () -> [ManagedAuthFile]
     ) {
         self.quota = quota
         self.accounts = accounts
@@ -62,7 +60,6 @@ public final class QuotaFeatureController {
         self.menuBarSettings = menuBarSettings
         self.notifications = notifications
         self.authFiles = authFiles
-        self.museAuthorizer = museAuthorizer
         refreshSettings.addCadenceChangeHandler { [weak self] _ in
             self?.restartAutomaticRefresh()
         }
@@ -123,23 +120,6 @@ public final class QuotaFeatureController {
             force: true
         )
         await finishRefresh()
-    }
-
-    /// Grants Quotio access to the Muse Code credential, then re-detects.
-    ///
-    /// Meta's CLI does not list Quotio in that keychain item's access control, so the
-    /// ordinary silent read is refused and no background poll can ever fix it. This is
-    /// the one user-initiated moment where the system prompt is appropriate; answering
-    /// "Always Allow" makes every later silent read succeed.
-    ///
-    /// Returns false when access is still refused, so the caller can say so instead of
-    /// leaving the user with a row that never fills in.
-    @discardableResult
-    func authorizeMuseCredential() async -> Bool {
-        guard let museAuthorizer else { return false }
-        let granted = await museAuthorizer.authorize()
-        await refreshAutoDetectedProviders()
-        return granted
     }
 
     func refreshAutoDetectedProviders() async {

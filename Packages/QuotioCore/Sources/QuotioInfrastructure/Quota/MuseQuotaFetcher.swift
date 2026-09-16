@@ -4,31 +4,34 @@ import QuotioDomain
 
 /// Muse Code (Meta) subscription quota.
 ///
-/// The Muse Code CLI keeps a pointer at `~/.config/muse/auth.json` that carries no
-/// secret, and stores the credential itself in the login keychain under service
-/// `ai.meta.dev.credentials`, account `meta`. That payload holds two values: the Model
-/// API key the CLI sends to `api.meta.ai/v1`, and the Meta account access token minted
-/// by the device grant. Only the account token reads subscription usage, so the Model
-/// API key is never read, returned, or logged here.
+/// The credential comes from the auth file CLIProxyAPI writes after a Meta login
+/// (`meta-<email>-<hash>.json`), the same place every other proxy-backed provider keeps
+/// its account. That file carries both the Meta account access token and the `LLM|`
+/// Model API key the proxy sends to `api.meta.ai/v1`; only the account token is read
+/// here, because only it can read subscription usage.
+///
+/// Reading the file rather than the Muse Code CLI's keychain item is deliberate. Meta's
+/// CLI does not list Quotio in that item's access control, so asking macOS for its data
+/// is refused with `errSecAuthFailed` unless the user grants access to each signed build
+/// by hand. The proxy login sidesteps that entirely: one browser device code, and the
+/// credential lands in a file Quotio can read in both operating modes, with no prompt.
 ///
 /// Meta publishes no quota endpoint. The one machine-readable snapshot is the
-/// `subs_usage` object in the response of the subscription-key endpoint, which makes a
-/// refresh an auth-plane POST rather than a metered inference call. That endpoint is
-/// rate limited and hands back the same key every time, so successful reads are spaced
-/// and failures back off. Both bounds hold for a forced refresh too — a refresh may skip
-/// a display cache, but it may not spend another key request — and the previous snapshot
-/// is served while a bound holds.
-///
-/// The keychain read is non-interactive, like every other external credential Quotio
-/// reads. An item whose access control does not admit Quotio simply reads as absent.
+/// `subs_usage` object returned by the subscription-key endpoint, which makes a refresh
+/// an auth-plane POST rather than a metered inference call. That endpoint is rate
+/// limited, so successful reads are spaced and failures back off; both bounds hold for a
+/// forced refresh, and the previous reading is served while a bound runs.
 public actor MuseQuotaFetcher: QuotaFetching {
-  public struct Pointer: Sendable, Equatable {
+  /// One Meta account, as the proxy's auth file describes it.
+  public struct Credential: Sendable, Equatable {
     public let accountKey: String
     public let displayName: String?
+    public let accessToken: String
 
-    public init(accountKey: String, displayName: String?) {
+    public init(accountKey: String, displayName: String?, accessToken: String) {
       self.accountKey = accountKey
       self.displayName = displayName
+      self.accessToken = accessToken
     }
   }
 
@@ -39,10 +42,10 @@ public actor MuseQuotaFetcher: QuotaFetching {
     let readyAt: Date
   }
 
-  public static let pointerPath = "~/.config/muse/auth.json"
-  public static let keychainService = "ai.meta.dev.credentials"
-  public static let keychainAccount = "meta"
-  /// Used when the pointer names no account. Meta issues one credential per machine.
+  public static let authDirectory = "~/.cli-proxy-api"
+  /// CLIProxyAPI files Muse Code under Meta's own provider id.
+  public static let authFilePrefix = "meta-"
+  /// Used when the auth file names no account. Meta issues one credential per login.
   public static let localAccountKey = "Muse Code"
   /// Meta rejects the subscription-key endpoint without it.
   public static let apiVersion = "1.0.0"
@@ -53,59 +56,37 @@ public actor MuseQuotaFetcher: QuotaFetching {
   public static let fiveHourWindowMinutes: Double = 300
 
   public nonisolated let provider = QuotaProvider.muse
-  private let files: any QuotaCredentialFileReading
-  private let credentials: any ExternalCredentialReading
+  private let credentials: any MuseCredentialSourcing
   private let session: any QuotaHTTPSession
-  private let pointerPath: String
   private let keyURL: URL
   private let now: @Sendable () -> Date
   private var cache: [String: CachedQuota] = [:]
 
   public init(
-    files: any QuotaCredentialFileReading = LocalQuotaCredentialFileReader(),
-    credentials: any ExternalCredentialReading = ExternalKeychainCredentialReader(),
+    credentials: any MuseCredentialSourcing = LocalMuseCredentialStore(),
     session: any QuotaHTTPSession = URLSession(
       configuration: ProxyURLSessionFactory.makeConfiguration(timeout: 15)),
-    pointerPath: String = MuseQuotaFetcher.pointerPath,
     keyURL: URL = URL(string: "https://api.meta.ai/muse-code/key")!,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
-    self.files = files
     self.credentials = credentials
     self.session = session
-    self.pointerPath = pointerPath
     self.keyURL = keyURL
     self.now = now
   }
 
   public func fetch(_ request: QuotaFetchRequest) async throws -> QuotaProviderOutput {
-    guard let data = await files.read(path: pointerPath),
-      let pointer = Self.loadPointer(data: data)
-    else {
+    let all = await credentials.credentials(for: request.mode)
+    guard !all.isEmpty else {
       return .init(quotas: [:], credentialAvailability: .missing, credentialAccountKeys: [])
     }
-    let keys: Set<String> = [pointer.accountKey]
-    guard Self.includes(pointer.accountKey, in: request.scope) else {
-      return .init(quotas: [:], credentialAvailability: .present, credentialAccountKeys: keys)
-    }
-    guard let quota = await quota(for: pointer) else {
-      return .init(quotas: [:], credentialAvailability: .present, credentialAccountKeys: keys)
+    let keys = Set(all.map(\.accountKey))
+    var quotas: [String: ProviderQuota] = [:]
+    for credential in all where Self.includes(credential.accountKey, in: request.scope) {
+      if let quota = await quota(for: credential) { quotas[credential.accountKey] = quota }
     }
     return .init(
-      quotas: [pointer.accountKey: quota],
-      credentialAvailability: .present,
-      credentialAccountKeys: keys
-    )
-  }
-
-  /// Reads the pointer the Muse Code CLI writes. It holds no secret by design.
-  public nonisolated static func loadPointer(data: Data) -> Pointer? {
-    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      let providers = root["providers"] as? [String: Any],
-      let meta = providers["meta"] as? [String: Any]
-    else { return nil }
-    let email = trimmed(meta["user_email"] as? String)?.lowercased()
-    return Pointer(accountKey: email ?? localAccountKey, displayName: email)
+      quotas: quotas, credentialAvailability: .present, credentialAccountKeys: keys)
   }
 
   /// Turns Meta's `subs_usage` object into the rolling and weekly windows Quotio renders.
@@ -148,40 +129,31 @@ public actor MuseQuotaFetcher: QuotaFetching {
       models: metrics, lastUpdated: now, planType: plan, accountDisplayName: displayName)
   }
 
-  private func quota(for pointer: Pointer) async -> ProviderQuota? {
+  private func quota(for credential: Credential) async -> ProviderQuota? {
     let at = now()
-    if let cached = cache[pointer.accountKey], at < cached.readyAt { return cached.quota }
-    guard
-      let record = await credentials.read(
-        service: Self.keychainService, account: Self.keychainAccount),
-      let token = Self.accountAccessToken(record.data)
-    else {
-      // A keychain the process may not read is not a rate-limited endpoint: nothing to
-      // back off from, and the next poll may well succeed after the user grants access.
-      return nil
-    }
+    if let cached = cache[credential.accountKey], at < cached.readyAt { return cached.quota }
     do {
-      let quota = try await read(token: token, pointer: pointer)
-      cache[pointer.accountKey] = CachedQuota(
+      let quota = try await read(credential)
+      cache[credential.accountKey] = CachedQuota(
         quota: quota, readyAt: at.addingTimeInterval(Self.refreshInterval))
       return quota
     } catch {
       // Every failure backs off, expired credentials included: the account token cannot
-      // be refreshed, so retrying it on the next poll only spends rate limit. The last
-      // good reading keeps being served while the backoff runs.
-      let previous = cache[pointer.accountKey]?.quota
-      cache[pointer.accountKey] = CachedQuota(
+      // be refreshed from here, so retrying it on the next poll only spends rate limit.
+      // The last good reading keeps being served while the backoff runs.
+      let previous = cache[credential.accountKey]?.quota
+      cache[credential.accountKey] = CachedQuota(
         quota: previous, readyAt: at.addingTimeInterval(Self.failureBackoff))
       return previous
     }
   }
 
-  private func read(token: String, pointer: Pointer) async throws -> ProviderQuota {
+  private func read(_ credential: Credential) async throws -> ProviderQuota {
     var request = URLRequest(url: keyURL)
     request.httpMethod = "POST"
     // No `onboard`: this is a read. Onboarding on a poll would change the user's account.
     request.httpBody = Data("{}".utf8)
-    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue(Self.apiVersion, forHTTPHeaderField: "x-api-version")
@@ -192,7 +164,7 @@ public actor MuseQuotaFetcher: QuotaFetching {
     }
     if http.statusCode == 401 || http.statusCode == 403 {
       return ProviderQuota(
-        lastUpdated: now(), isForbidden: true, accountDisplayName: pointer.displayName)
+        lastUpdated: now(), isForbidden: true, accountDisplayName: credential.displayName)
     }
     guard 200...299 ~= http.statusCode else {
       throw InfrastructureQuotaFetchError.httpError(http.statusCode)
@@ -203,7 +175,7 @@ public actor MuseQuotaFetcher: QuotaFetching {
     }
     let plan = Self.trimmed(body["subs_tier_name"] as? String)
     let display = Self.trimmed((body["user_email"] as? String)?.lowercased())
-      ?? pointer.displayName
+      ?? credential.displayName
     if body["is_subs_active"] as? Bool == false {
       return ProviderQuota(
         models: [
@@ -220,14 +192,6 @@ public actor MuseQuotaFetcher: QuotaFetching {
     return Self.mapUsage(usage, plan: plan, displayName: display, now: now())
   }
 
-  /// The keychain payload also holds the Model API key; it is deliberately not read.
-  private nonisolated static func accountAccessToken(_ data: Data) -> String? {
-    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-      return nil
-    }
-    return trimmed(json["access_token"] as? String)
-  }
-
   private nonisolated static func remainingPercentage(_ value: Any?) -> Double? {
     guard let used = number(value) else { return nil }
     return max(0, min(100, 100 - used))
@@ -242,7 +206,7 @@ public actor MuseQuotaFetcher: QuotaFetching {
     value is NSNumber ? (value as? NSNumber)?.doubleValue : (value as? String).flatMap(Double.init)
   }
 
-  private nonisolated static func trimmed(_ value: String?) -> String? {
+  static func trimmed(_ value: String?) -> String? {
     guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
       return nil
     }
@@ -255,5 +219,101 @@ public actor MuseQuotaFetcher: QuotaFetching {
     case .account(let value): value == key
     case .importedAccounts(let values): values.contains(key)
     }
+  }
+}
+
+/// Supplies the Meta accounts Quotio can read.
+public protocol MuseCredentialSourcing: Sendable {
+  func credentials(for mode: QuotaOperatingMode) async -> [MuseQuotaFetcher.Credential]
+}
+
+/// Reads them from the proxy's auth directory, where a Meta login leaves them.
+public struct LocalMuseCredentialStore: MuseCredentialSourcing {
+  private let authDirectory: String
+
+  public init(authDirectory: String = MuseQuotaFetcher.authDirectory) {
+    self.authDirectory = authDirectory
+  }
+
+  public func credentials(for mode: QuotaOperatingMode) async -> [MuseQuotaFetcher.Credential] {
+    MuseQuotaFetcher.loadCredentials(directory: authDirectory)
+  }
+}
+
+/// Composes the sources in the same order every other provider uses: accounts Quotio
+/// owns in its own keychain vault first — and only in monitor mode, where Quotio is the
+/// one holding them — then the accounts the local proxy logged in. Duplicates collapse
+/// on the account key, so an account present in both is read once, from the vault.
+public struct CompositeMuseCredentialSource: MuseCredentialSourcing {
+  private let local: any MuseCredentialSourcing
+  private let vault: any CredentialVault
+  private let metadata: any AccountMetadataRepository
+
+  public init(
+    local: any MuseCredentialSourcing = LocalMuseCredentialStore(),
+    vault: any CredentialVault,
+    metadata: any AccountMetadataRepository
+  ) {
+    self.local = local
+    self.vault = vault
+    self.metadata = metadata
+  }
+
+  public func credentials(for mode: QuotaOperatingMode) async -> [MuseQuotaFetcher.Credential] {
+    var result: [MuseQuotaFetcher.Credential] = []
+    if mode == .monitor {
+      let disabled = await metadata.disabledAccountIDs()
+      for account in await vault.accounts()
+      where account.providerID.rawValue == QuotaProvider.muse.rawValue
+        && !account.isDisabled && !disabled.contains(account.id)
+      {
+        guard let credential = await vault.credential(for: account.id) else { continue }
+        result.append(
+          .init(
+            accountKey: account.accountKey,
+            displayName: account.displayName,
+            accessToken: credential.accessToken
+          ))
+      }
+    }
+    result.append(contentsOf: await local.credentials(for: mode))
+    var seen = Set<String>()
+    return result.filter { seen.insert($0.accountKey).inserted }
+  }
+}
+
+public extension MuseQuotaFetcher {
+  /// Parses the proxy's Meta auth files.
+  ///
+  /// A symlink is never followed: these files are treated as hostile input, like every
+  /// other credential this app reads.
+  nonisolated static func loadCredentials(directory: String) -> [Credential] {
+    let expanded = NSString(string: directory).expandingTildeInPath
+    guard let names = try? FileManager.default.contentsOfDirectory(atPath: expanded) else {
+      return []
+    }
+    return names.sorted().compactMap { name in
+      guard name.hasPrefix(authFilePrefix), name.hasSuffix(".json") else { return nil }
+      let path = (expanded as NSString).appendingPathComponent(name)
+      let url = URL(fileURLWithPath: path)
+      guard (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+        let data = try? Data(contentsOf: url)
+      else { return nil }
+      return credential(from: data)
+    }
+  }
+
+  /// Reads one auth file. The `api_key` beside the account token is deliberately
+  /// untouched: it authenticates model calls, which is the proxy's job, not Quotio's.
+  nonisolated static func credential(from data: Data) -> Credential? {
+    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let accessToken = trimmed(json["access_token"] as? String)
+    else { return nil }
+    let email = trimmed((json["email"] as? String)?.lowercased())
+    return Credential(
+      accountKey: email ?? localAccountKey,
+      displayName: email,
+      accessToken: accessToken
+    )
   }
 }

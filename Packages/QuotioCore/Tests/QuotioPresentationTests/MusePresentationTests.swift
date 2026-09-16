@@ -29,7 +29,7 @@ final class MusePresentationTests: XCTestCase {
 
     func testProviderIdentityIsDistinctFromEveryOtherProvider() {
         XCTAssertEqual(QuotaProvider.muse.displayName, "Muse Code")
-        XCTAssertEqual(QuotaProvider.muse.oauthEndpoint, "")
+        XCTAssertEqual(QuotaProvider.muse.oauthEndpoint, "/meta-auth-url")
         XCTAssertNil(QuotaProvider.muse.menuBarIconAsset)
         for trait in [
             QuotaProvider.allCases.map(\.displayName),

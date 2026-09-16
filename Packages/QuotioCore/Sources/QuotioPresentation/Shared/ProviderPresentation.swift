@@ -105,6 +105,7 @@ public extension QuotaProvider {
         case .qwen: "/qwen-auth-url"
         case .iflow: "/iflow-auth-url"
         case .antigravity: "/antigravity-auth-url"
+        case .muse: "/meta-auth-url"
         default: ""
         }
     }

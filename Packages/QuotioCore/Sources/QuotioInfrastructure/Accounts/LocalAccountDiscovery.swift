@@ -251,23 +251,19 @@ public actor LocalAccountDiscovery: AccountDiscovering {
         )]
     }
 
-    /// The Muse Code CLI writes a pointer that carries no secret; its presence is what
-    /// marks the account as available. The credential itself stays in the keychain.
+    /// Meta accounts come from the auth file CLIProxyAPI writes after a Meta login,
+    /// the same place every other proxy-backed account lives.
     private func discoverMuseCredential() async -> [Account] {
-        let path = homeDirectory.appendingPathComponent(".config/muse/auth.json").path
-        guard let data = await quotaFiles.read(path: path) else { return [] }
-        return Self.museAccount(pointer: data, path: path).map { [$0] } ?? []
-    }
-
-    static func museAccount(pointer data: Data, path: String) -> Account? {
-        guard let pointer = MuseQuotaFetcher.loadPointer(data: data) else { return nil }
-        return account(
-            provider: .muse,
-            accountKey: pointer.accountKey,
-            displayName: pointer.displayName,
-            source: .nativeCredential,
-            credentialReference: path
-        )
+        let directory = homeDirectory.appendingPathComponent(".cli-proxy-api").path
+        return MuseQuotaFetcher.loadCredentials(directory: directory).map { credential in
+            Self.account(
+                provider: .muse,
+                accountKey: credential.accountKey,
+                displayName: credential.displayName,
+                source: .legacyCLIProxy,
+                credentialReference: directory
+            )
+        }
     }
 
     private func discoverGrokCredentials() async -> [Account] {

@@ -42,7 +42,7 @@ public enum QuotaProvider: String, CaseIterable, Codable, Identifiable, Sendable
 
     public var supportsManualAuth: Bool {
         switch self {
-        case .cursor, .trae, .devin, .grok, .glm, .clinePass, .muse:
+        case .cursor, .trae, .devin, .grok, .glm, .clinePass:
             false
         default:
             true
@@ -64,7 +64,7 @@ public enum QuotaProvider: String, CaseIterable, Codable, Identifiable, Sendable
 
     public var isQuotaTrackingOnly: Bool {
         switch self {
-        case .cursor, .trae, .factoryDroid, .devin, .grok, .openRouter, .amp, .warp, .muse:
+        case .cursor, .trae, .factoryDroid, .devin, .grok, .openRouter, .amp, .warp:
             true
         default:
             false

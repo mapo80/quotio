@@ -247,7 +247,13 @@ enum CompositionRoot {
             ),
             QuotioInfrastructure.DevinQuotaFetcher(session: quotaHTTPSession),
             QuotioInfrastructure.GrokQuotaFetcher(session: quotaHTTPSession),
-            QuotioInfrastructure.MuseQuotaFetcher(session: quotaHTTPSession),
+            QuotioInfrastructure.MuseQuotaFetcher(
+                credentials: QuotioInfrastructure.CompositeMuseCredentialSource(
+                    vault: credentialVault,
+                    metadata: metadataRepository
+                ),
+                session: quotaHTTPSession
+            ),
         ])
         let quotaScreenModel = QuotaScreenModel(
             coordinator: QuotaRefreshCoordinator(
@@ -295,8 +301,7 @@ enum CompositionRoot {
             refreshSettings: refreshSettings,
             menuBarSettings: menuBarSettings,
             notifications: notificationController,
-            authFiles: { [] },
-            museAuthorizer: QuotioInfrastructure.MuseKeychainAuthorizer()
+            authFiles: { [] }
         )
         antigravityAccountScreenModel.setDidSwitchHandler { [weak quotaController] in
             await quotaController?.refresh(provider: .antigravity)

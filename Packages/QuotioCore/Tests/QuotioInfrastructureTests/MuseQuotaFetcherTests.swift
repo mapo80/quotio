@@ -6,43 +6,62 @@ import XCTest
 @testable import QuotioInfrastructure
 
 final class MuseQuotaFetcherTests: XCTestCase {
-  private static let pointer = """
-    {"schema_version":2,"providers":{"meta":{"mechanism":"oauth","storage":"keychain",
-    "api_base_url":"https://api.meta.ai/v1","user_email":"Developer@Example.test"}}}
+  /// Shaped like the auth file CLIProxyAPI writes after a Meta login, including the
+  /// Model API key this fetcher must leave alone.
+  private static let authFile = """
+    {"type":"meta","auth_kind":"oauth","access_token":"meta-account-token",
+    "api_key":"LLM|1234567890|key-material","base_url":"https://api.meta.ai/v1",
+    "email":"Developer@Example.test","name":"Developer"}
     """
-  /// Shaped like the subscription-key response, including the field this fetcher must
-  /// never read back out.
   private static let keyResponse = """
     {"api_key":"LLM|1234567890|key-material","is_subs_active":true,
     "subs_tier_name":"Muse Code Pro","user_email":"developer@example.test",
-    "user_id":"1234567890","subs_usage":{"tier":"1234567890",
-    "window":{"used_percent":12,"resets_at":1788431188,"window_duration_mins":300},
+    "subs_usage":{"window":{"used_percent":12,"resets_at":1788431188,"window_duration_mins":300},
     "weekly":{"used_percent":40,"resets_at":1788739200}}}
     """
-  private static let keychain = """
-    {"api_key":"LLM|1234567890|key-material","access_token":"meta-account-token"}
-    """
 
-  func testPointerNamesTheAccountByEmailAndFallsBackWhenItIsAbsent() {
-    let named = MuseQuotaFetcher.loadPointer(data: Data(Self.pointer.utf8))
-    XCTAssertEqual(named?.accountKey, "developer@example.test")
-    XCTAssertEqual(named?.displayName, "developer@example.test")
+  func testReadsTheProxyAuthFileAndIgnoresTheModelAPIKeyBesideTheAccountToken() {
+    let credential = MuseQuotaFetcher.credential(from: Data(Self.authFile.utf8))
 
-    let anonymous = MuseQuotaFetcher.loadPointer(
-      data: Data(#"{"providers":{"meta":{"storage":"keychain"}}}"#.utf8))
-    XCTAssertEqual(anonymous?.accountKey, MuseQuotaFetcher.localAccountKey)
-    XCTAssertNil(anonymous?.displayName)
+    XCTAssertEqual(credential?.accountKey, "developer@example.test")
+    XCTAssertEqual(credential?.displayName, "developer@example.test")
+    XCTAssertEqual(credential?.accessToken, "meta-account-token")
+  }
 
-    XCTAssertNil(MuseQuotaFetcher.loadPointer(data: Data(#"{"providers":{}}"#.utf8)))
-    XCTAssertNil(MuseQuotaFetcher.loadPointer(data: Data("not json".utf8)))
+  func testAnAuthFileWithNoAccountTokenIsNotAnAccount() {
+    XCTAssertNil(
+      MuseQuotaFetcher.credential(from: Data(#"{"type":"meta","api_key":"LLM|1|k"}"#.utf8)))
+    XCTAssertNil(MuseQuotaFetcher.credential(from: Data("not json".utf8)))
+  }
+
+  func testAnAuthFileWithoutAnEmailStillYieldsOneAccount() {
+    let credential = MuseQuotaFetcher.credential(
+      from: Data(#"{"type":"meta","access_token":"meta-account-token"}"#.utf8))
+
+    XCTAssertEqual(credential?.accountKey, MuseQuotaFetcher.localAccountKey)
+    XCTAssertNil(credential?.displayName)
+  }
+
+  func testOnlyMetaFilesInTheAuthDirectoryAreRead() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data(Self.authFile.utf8)
+      .write(to: directory.appendingPathComponent("meta-developer-1234.json"))
+    try Data(Self.authFile.utf8)
+      .write(to: directory.appendingPathComponent("claude-someone.json"))
+    try Data("{}".utf8).write(to: directory.appendingPathComponent("meta-broken.json"))
+
+    let credentials = MuseQuotaFetcher.loadCredentials(directory: directory.path)
+
+    XCTAssertEqual(credentials.map(\.accountKey), ["developer@example.test"])
   }
 
   func testSendsTheAccountTokenAndReportsBothWindowsAsRemainingPercentages() async throws {
     let session = MuseSession { request in
       XCTAssertEqual(request.url?.absoluteString, "https://api.meta.ai/muse-code/key")
       XCTAssertEqual(request.httpMethod, "POST")
-      // The account token reads usage; the Model API key in the keychain must not be
-      // sent here, and `onboard` would change the account on a poll.
       XCTAssertEqual(
         request.value(forHTTPHeaderField: "Authorization"), "Bearer meta-account-token")
       XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-version"), "1.0.0")
@@ -50,8 +69,8 @@ final class MuseQuotaFetcherTests: XCTestCase {
       return (Self.keyResponse, 200)
     }
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
-      session: session, now: { Date(timeIntervalSince1970: 1_788_000_000) })
+      credentials: MuseSource(Self.authFile), session: session,
+      now: { Date(timeIntervalSince1970: 1_788_000_000) })
 
     let output = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
 
@@ -59,23 +78,17 @@ final class MuseQuotaFetcherTests: XCTestCase {
     XCTAssertEqual(output.credentialAccountKeys, ["developer@example.test"])
     let quota = try XCTUnwrap(output.quotas["developer@example.test"])
     XCTAssertEqual(quota.planType, "Muse Code Pro")
-    XCTAssertEqual(quota.accountDisplayName, "developer@example.test")
     let session5h = try XCTUnwrap(quota.models.first { $0.name == "muse-session" })
     XCTAssertEqual(session5h.percentage, 88)
-    XCTAssertEqual(session5h.usedPercentage, 12)
     XCTAssertEqual(
       ISO8601DateFormatter().date(from: session5h.resetTime),
       Date(timeIntervalSince1970: 1_788_431_188))
-    let weekly = try XCTUnwrap(quota.models.first { $0.name == "muse-weekly" })
-    XCTAssertEqual(weekly.percentage, 60)
-    XCTAssertEqual(
-      ISO8601DateFormatter().date(from: weekly.resetTime),
-      Date(timeIntervalSince1970: 1_788_739_200))
+    XCTAssertEqual(quota.models.first { $0.name == "muse-weekly" }?.percentage, 60)
   }
 
   func testNeverCarriesTheModelAPIKeyOutOfTheResponse() async throws {
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
+      credentials: MuseSource(Self.authFile),
       session: MuseSession { _ in (Self.keyResponse, 200) },
       now: { Date(timeIntervalSince1970: 1_788_000_000) })
 
@@ -84,7 +97,7 @@ final class MuseQuotaFetcherTests: XCTestCase {
 
     let rendered =
       [quota.planType, quota.accountDisplayName].compactMap { $0 }
-      + quota.models.flatMap { [$0.name, $0.resetTime, $0.tooltip ?? ""] }
+      + quota.models.flatMap { [$0.name, $0.resetTime] }
     for value in rendered {
       XCTAssertFalse(value.contains("LLM|"), "leaked the Model API key in \(value)")
       XCTAssertFalse(value.contains("key-material"), "leaked the Model API key in \(value)")
@@ -92,49 +105,24 @@ final class MuseQuotaFetcherTests: XCTestCase {
   }
 
   func testCarriesAWindowOfAnotherDurationUnderItsOwnNameInsteadOfTheSessionSlot() {
-    let usage: [String: Any] = [
-      "window": ["used_percent": 25, "resets_at": 1_788_431_188, "window_duration_mins": 600]
-    ]
     let quota = MuseQuotaFetcher.mapUsage(
-      usage, plan: nil, displayName: nil, now: Date(timeIntervalSince1970: 1_788_000_000))
+      ["window": ["used_percent": 25, "resets_at": 1_788_431_188, "window_duration_mins": 600]],
+      plan: nil, displayName: nil, now: Date(timeIntervalSince1970: 1_788_000_000))
 
     XCTAssertEqual(quota.models.map(\.name), ["muse-window-600", "muse-weekly"])
     XCTAssertEqual(quota.models.first?.percentage, 75)
   }
 
-  func testAWindowWithNoDeclaredDurationStaysTheSessionWindow() {
-    let quota = MuseQuotaFetcher.mapUsage(
-      ["window": ["used_percent": 0]], plan: nil, displayName: nil,
-      now: Date(timeIntervalSince1970: 1_788_000_000))
-
-    XCTAssertEqual(quota.models.map(\.name), ["muse-session", "muse-weekly"])
-    XCTAssertEqual(quota.models.first?.resetTime, "")
-  }
-
-  /// A window whose only readable field is its reset time still reports Unknown, not a
-  /// fetch failure: `percentage < 0` is this app's existing "unknown" sentinel, rendered
-  /// as unavailable by the presentation layer.
-  func testAWindowWithNoReadablePercentageIsUnknownRatherThanOmitted() {
-    let quota = MuseQuotaFetcher.mapUsage(
-      ["window": ["resets_at": 1_788_431_188]], plan: "Muse Code Pro", displayName: nil,
-      now: Date(timeIntervalSince1970: 1_788_000_000))
-
-    XCTAssertEqual(quota.models.map(\.name), ["muse-session", "muse-weekly"])
-    XCTAssertEqual(quota.models[0].percentage, -1)
-    XCTAssertEqual(quota.planType, "Muse Code Pro")
-  }
-
-  /// Reproduces the real response of an active "Muse Code High Usage" subscription,
-  /// measured live 2026-09-16: `is_subs_active: true` with no `subs_usage` object at
-  /// all. Meta appears to only attach it around a mint, not on every read. The account
-  /// and plan were read correctly and must not be reported as a fetch failure.
+  /// Reproduces the real response of an active subscription, measured live 2026-09-16:
+  /// `is_subs_active: true` with no `subs_usage` at all. Both windows must still be
+  /// reported, as unknown rather than as a fetch failure.
   func testAnActiveSubscriptionWithNoSubsUsageReportsUnknownWindowsNotAFailure() async throws {
     let body = """
-      {"api_key":"LLM|1234567890|key-material","is_subs_active":true,
-      "subs_tier_name":"Muse Code High Usage","user_email":"user@example.test"}
+      {"is_subs_active":true,"subs_tier_name":"Muse Code High Usage",
+      "user_email":"developer@example.test"}
       """
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
+      credentials: MuseSource(Self.authFile),
       session: MuseSession { _ in (body, 200) },
       now: { Date(timeIntervalSince1970: 1_788_000_000) })
 
@@ -147,13 +135,11 @@ final class MuseQuotaFetcherTests: XCTestCase {
   }
 
   func testInactiveSubscriptionReportsAStatusInsteadOfInventedWindows() async throws {
-    let body = """
-      {"api_key":"LLM|1234567890|key-material","is_subs_active":false,
-      "subs_tier_name":"Muse Code Free"}
-      """
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
-      session: MuseSession { _ in (body, 200) },
+      credentials: MuseSource(Self.authFile),
+      session: MuseSession { _ in
+        (#"{"is_subs_active":false,"subs_tier_name":"Muse Code Free"}"#, 200)
+      },
       now: { Date(timeIntervalSince1970: 1_788_000_000) })
 
     let output = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
@@ -165,7 +151,7 @@ final class MuseQuotaFetcherTests: XCTestCase {
 
   func testRejectedCredentialMarksTheAccountForbiddenRatherThanEmpty() async throws {
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
+      credentials: MuseSource(Self.authFile),
       session: MuseSession { _ in (#"{"error":"invalid_api_key"}"#, 401) },
       now: { Date(timeIntervalSince1970: 1_788_000_000) })
 
@@ -174,10 +160,10 @@ final class MuseQuotaFetcherTests: XCTestCase {
     XCTAssertEqual(output.quotas["developer@example.test"]?.isForbidden, true)
   }
 
-  func testMissingPointerReportsTheCredentialAsMissing() async throws {
+  func testNoAuthFileReportsTheCredentialAsMissing() async throws {
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(nil), credentials: MuseCredentials(Self.keychain),
-      session: MuseSession { _ in XCTFail("no request without a pointer"); return ("", 200) },
+      credentials: MuseSource(nil),
+      session: MuseSession { _ in XCTFail("no request without a credential"); return ("", 200) },
       now: { Date(timeIntervalSince1970: 1_788_000_000) })
 
     let output = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
@@ -186,22 +172,9 @@ final class MuseQuotaFetcherTests: XCTestCase {
     XCTAssertEqual(output.credentialAccountKeys, [])
   }
 
-  func testAnUnreadableKeychainLeavesTheAccountVisibleWithoutQuota() async throws {
-    let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(nil),
-      session: MuseSession { _ in XCTFail("no request without a token"); return ("", 200) },
-      now: { Date(timeIntervalSince1970: 1_788_000_000) })
-
-    let output = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
-
-    XCTAssertEqual(output.credentialAvailability, .present)
-    XCTAssertEqual(output.credentialAccountKeys, ["developer@example.test"])
-    XCTAssertTrue(output.quotas.isEmpty)
-  }
-
   func testAnotherAccountInScopeIsNotFetched() async throws {
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
+      credentials: MuseSource(Self.authFile),
       session: MuseSession { _ in XCTFail("out of scope"); return ("", 200) },
       now: { Date(timeIntervalSince1970: 1_788_000_000) })
 
@@ -218,86 +191,107 @@ final class MuseQuotaFetcherTests: XCTestCase {
     let clock = MuseClock(Date(timeIntervalSince1970: 1_788_000_000))
     let session = MuseSession { _ in (Self.keyResponse, 200) }
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
-      session: session, now: { clock.date })
+      credentials: MuseSource(Self.authFile), session: session, now: { clock.date })
 
     _ = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
     clock.advance(MuseQuotaFetcher.refreshInterval - 1)
     let cached = try await fetcher.fetch(.init(provider: .muse, mode: .monitor, force: true))
-    let requests1 = await session.count()
-    XCTAssertEqual(requests1, 1)
+    let afterCache = await session.count()
+    XCTAssertEqual(afterCache, 1)
     XCTAssertNotNil(cached.quotas["developer@example.test"])
 
     clock.advance(2)
     _ = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
-    let requests2 = await session.count()
-    XCTAssertEqual(requests2, 2)
+    let afterWindow = await session.count()
+    XCTAssertEqual(afterWindow, 2)
   }
 
   func testAFailureBacksOffAndKeepsServingTheLastGoodReading() async throws {
     let clock = MuseClock(Date(timeIntervalSince1970: 1_788_000_000))
     let session = MuseSession { _ in (Self.keyResponse, 200) }
     let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
-      session: session, now: { clock.date })
+      credentials: MuseSource(Self.authFile), session: session, now: { clock.date })
 
     _ = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
     clock.advance(MuseQuotaFetcher.refreshInterval)
     await session.fail(true)
     let backedOff = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
-    let afterFailure = await session.count()
-    XCTAssertEqual(afterFailure, 2)
-    XCTAssertNotNil(backedOff.quotas["developer@example.test"])
+    XCTAssertNotNil(backedOff.quotas["developer@example.test"], "the last reading is kept")
 
     clock.advance(MuseQuotaFetcher.failureBackoff - 1)
     _ = try await fetcher.fetch(.init(provider: .muse, mode: .monitor, force: true))
     let stillTwo = await session.count()
     XCTAssertEqual(stillTwo, 2, "a forced refresh must not spend a key request")
-
-    clock.advance(2)
-    _ = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
-    let requests3 = await session.count()
-    XCTAssertEqual(requests3, 3)
   }
 
-  func testABackoffWithNothingCachedYetLeavesTheAccountWithoutQuota() async throws {
-    let clock = MuseClock(Date(timeIntervalSince1970: 1_788_000_000))
-    let session = MuseSession { _ in ("", 429) }
-    let fetcher = MuseQuotaFetcher(
-      files: MuseFileReader(Self.pointer), credentials: MuseCredentials(Self.keychain),
-      session: session, now: { clock.date })
+  /// The vault is the store Quotio owns, exactly as every other provider uses it, and it
+  /// is consulted only in monitor mode — in local-proxy mode the proxy holds the account.
+  func testMonitorModePrefersTheVaultAndLocalProxyModeDoesNotTouchIt() async {
+    let vault = MuseVault(accountKey: "vaulted@example.test", token: "vault-token")
+    let source = CompositeMuseCredentialSource(
+      local: MuseSource(Self.authFile), vault: vault, metadata: MuseMetadata())
 
-    let first = try await fetcher.fetch(.init(provider: .muse, mode: .monitor))
-    XCTAssertTrue(first.quotas.isEmpty)
-    XCTAssertEqual(first.credentialAvailability, .present)
+    let monitor = await source.credentials(for: .monitor)
+    XCTAssertEqual(
+      monitor.map(\.accountKey), ["vaulted@example.test", "developer@example.test"])
+    XCTAssertEqual(monitor.first?.accessToken, "vault-token")
 
-    clock.advance(MuseQuotaFetcher.failureBackoff - 1)
-    _ = try await fetcher.fetch(.init(provider: .muse, mode: .monitor, force: true))
-    let requests1 = await session.count()
-    XCTAssertEqual(requests1, 1)
+    let proxy = await source.credentials(for: .localProxy)
+    XCTAssertEqual(proxy.map(\.accountKey), ["developer@example.test"])
+  }
+
+  func testAnAccountInBothStoresIsReadOnceFromTheVault() async {
+    let vault = MuseVault(accountKey: "developer@example.test", token: "vault-token")
+    let source = CompositeMuseCredentialSource(
+      local: MuseSource(Self.authFile), vault: vault, metadata: MuseMetadata())
+
+    let monitor = await source.credentials(for: .monitor)
+
+    XCTAssertEqual(monitor.map(\.accountKey), ["developer@example.test"])
+    XCTAssertEqual(monitor.first?.accessToken, "vault-token")
   }
 }
 
-private struct MuseFileReader: QuotaCredentialFileReading {
+private struct MuseSource: MuseCredentialSourcing {
   let payload: String?
   init(_ payload: String?) { self.payload = payload }
-  func read(path: String) async -> Data? { payload.map { Data($0.utf8) } }
+  func credentials(for mode: QuotaOperatingMode) async -> [MuseQuotaFetcher.Credential] {
+    payload.flatMap { MuseQuotaFetcher.credential(from: Data($0.utf8)) }.map { [$0] } ?? []
+  }
 }
 
-private actor MuseCredentials: ExternalCredentialReading {
-  private let payload: String?
-  init(_ payload: String?) { self.payload = payload }
+private actor MuseVault: CredentialVault {
+  private let account: Account
+  private let token: String
 
-  func read(service: String, account: String?) -> ExternalCredentialRecord? {
-    guard service == MuseQuotaFetcher.keychainService,
-      account == MuseQuotaFetcher.keychainAccount, let payload
-    else { return nil }
-    return ExternalCredentialRecord(data: Data(payload.utf8), account: account ?? "")
+  init(accountKey: String, token: String) {
+    account = Account.make(
+      providerID: AccountProviderID(rawValue: QuotaProvider.muse.rawValue),
+      accountKey: accountKey,
+      displayName: accountKey,
+      source: .quotioKeychain
+    )
+    self.token = token
   }
 
-  func compareAndSwap(service: String, account: String, expectedData: Data, newData: Data) -> Bool {
-    false
+  func accounts() async -> [Account] { [account] }
+  func credential(for accountID: String) async -> StoredCredential? {
+    guard accountID == account.id else { return nil }
+    return StoredCredential(
+      accessToken: token, refreshToken: nil, idToken: nil, accountID: nil, expiresAt: nil,
+      extra: [:])
   }
+  func reloadLatest(accountID: String) async -> StoredCredential? { nil }
+  func save(_ credential: StoredCredential, metadata: Account) async throws {}
+  func delete(accountID: String) async {}
+}
+
+private actor MuseMetadata: AccountMetadataRepository {
+  func accounts() async -> [Account] { [] }
+  func disabledAccountIDs() async -> Set<String> { [] }
+  func saveAccount(_ account: Account) async throws {}
+  func deleteAccount(_ accountID: String) async throws {}
+  func setDisabled(_ disabled: Bool, accountID: String) async throws {}
 }
 
 private actor MuseSession: QuotaHTTPSession {

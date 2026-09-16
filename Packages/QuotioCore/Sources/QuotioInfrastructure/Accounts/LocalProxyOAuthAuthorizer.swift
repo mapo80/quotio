@@ -263,6 +263,7 @@ private extension ProxyManagementOAuthProvider {
         case .qwen: self = .qwen
         case .iflow: self = .iflow
         case .antigravity: self = .antigravity
+        case .muse: self = .meta
         default: return nil
         }
     }
