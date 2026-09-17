@@ -52,16 +52,50 @@ public enum ClaudeCredentialOwnership: Equatable, Sendable {
     environment: [String: String] = ProcessInfo.processInfo.environment,
     fileManager: FileManager = .default
   ) -> ClaudeCredentialOwnership {
-    if isSymbolicLink(at: path, fileManager: fileManager) { return .externalCLI }
+    if containsSymbolicLink(at: path, fileManager: fileManager) { return .externalCLI }
 
-    let file = (path as NSString).resolvingSymlinksInPath
-    let cliDirectory = (configDirectory(environment: environment) as NSString)
-      .resolvingSymlinksInPath
+    let expanded = (path as NSString).expandingTildeInPath
+    let attributes = try? fileManager.attributesOfItem(atPath: expanded)
+    let referenceCount = (attributes?[.referenceCount] as? NSNumber)?.uint64Value ?? 1
+    return forOpenedAuthFile(
+      at: expanded, referenceCount: referenceCount, environment: environment)
+  }
+
+  /// Classifies a file already opened without following symlinks.
+  static func forOpenedAuthFile(
+    at path: String,
+    referenceCount: UInt64,
+    environment: [String: String]
+  ) -> ClaudeCredentialOwnership {
+    // Multiple names can share the CLI's single-use refresh token even without
+    // symlinks. Leave all multiply linked credentials read-only.
+    if referenceCount > 1 { return .externalCLI }
+
+    let file = canonicalPath(path)
+    let cliDirectory = canonicalPath(configDirectory(environment: environment))
     return file == cliDirectory || file.hasPrefix(cliDirectory + "/") ? .externalCLI : .quotio
   }
 
-  private static func isSymbolicLink(at path: String, fileManager: FileManager) -> Bool {
-    let attributes = try? fileManager.attributesOfItem(atPath: path)
-    return attributes?[.type] as? FileAttributeType == .typeSymbolicLink
+  static func canonicalPath(_ path: String) -> String {
+    let expanded = NSString(string: path).expandingTildeInPath
+    let standardized = URL(fileURLWithPath: expanded).standardizedFileURL.path
+    for alias in ["/etc", "/tmp", "/var"]
+    where standardized == alias || standardized.hasPrefix(alias + "/") {
+      return "/private" + standardized
+    }
+    return standardized
+  }
+
+  static func containsSymbolicLink(
+    at path: String, fileManager: FileManager = .default
+  ) -> Bool {
+    let url = URL(fileURLWithPath: path)
+    var current = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in url.pathComponents.dropFirst() {
+      current.appendPathComponent(component)
+      let attributes = try? fileManager.attributesOfItem(atPath: current.path)
+      if attributes?[.type] as? FileAttributeType == .typeSymbolicLink { return true }
+    }
+    return false
   }
 }

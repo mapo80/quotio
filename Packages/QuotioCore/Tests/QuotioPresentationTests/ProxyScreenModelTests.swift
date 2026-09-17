@@ -59,7 +59,7 @@ final class ProxyScreenModelTests: XCTestCase {
 
         await model.initialize()
         model.setPort(9000)
-        let updated = await waitUntil { await controller.currentPort() == 9000 }
+        let updated = await waitUntil { model.port == 9000 }
         let actions = await controller.actions()
 
         XCTAssertTrue(updated)

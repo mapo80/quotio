@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import QuotioApplication
 import QuotioDomain
@@ -25,6 +26,49 @@ public struct ClaudeQuotaCredential: Equatable, Sendable {
     self.expiresAt = expiresAt
     self.allowsRefresh = allowsRefresh
   }
+
+  /// Keeps one credential per account without letting an external read-only
+  /// credential hide a refreshable credential owned by Quotio.
+  static func uniqueByAccountKey(_ credentials: [Self], now: Date = Date()) -> [Self] {
+    let externalRefreshTokens = Set(
+      credentials.compactMap { credential in
+        credential.allowsRefresh ? nil : credential.refreshToken
+      })
+    var positions: [String: Int] = [:]
+    var result: [Self] = []
+
+    for original in credentials {
+      var credential = original
+      // A copied CLI token is still CLI-owned, regardless of its file location
+      // or account key. Keep it readable for scoped requests, but never refresh it.
+      if credential.allowsRefresh, let refreshToken = credential.refreshToken,
+        externalRefreshTokens.contains(refreshToken)
+      {
+        credential = Self(
+          accountKey: credential.accountKey,
+          accessToken: credential.accessToken,
+          refreshToken: credential.refreshToken,
+          expiresAt: credential.expiresAt,
+          allowsRefresh: false
+        )
+      }
+      if let index = positions[credential.accountKey] {
+        let selected = result[index]
+        let selectedCanRefresh = selected.allowsRefresh && selected.refreshToken != nil
+        let credentialCanRefresh = credential.allowsRefresh && credential.refreshToken != nil
+        let selectedIsUsable = selected.expiresAt.map { $0 > now } ?? true
+        let credentialIsUsable = credential.expiresAt.map { $0 > now } ?? true
+        if (credentialCanRefresh && !selectedCanRefresh)
+          || (!selectedCanRefresh && credentialIsUsable && !selectedIsUsable) {
+          result[index] = credential
+        }
+      } else {
+        positions[credential.accountKey] = result.count
+        result.append(credential)
+      }
+    }
+    return result
+  }
 }
 
 public protocol ClaudeQuotaCredentialLoading: Sendable {
@@ -51,16 +95,23 @@ public struct LocalClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading {
   public static let nativePath = "~/.claude/.credentials.json"
 
   private let environment: [String: String]
+  private let legacyDirectory: String
 
   public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
     self.environment = environment
+    self.legacyDirectory = Self.legacyDirectory
+  }
+
+  init(environment: [String: String], legacyDirectory: String) {
+    self.environment = environment
+    self.legacyDirectory = legacyDirectory
   }
 
   public func credentials(for mode: QuotaOperatingMode) async -> [ClaudeQuotaCredential] {
-    var seen = Set<String>()
-    return credentialPaths().compactMap { path in
-      Self.load(path: path, allowsRefresh: allowsRefresh(path: path))
-    }.filter { seen.insert($0.accountKey).inserted }
+    let credentials = credentialPaths().compactMap { path in
+      Self.load(path: path, environment: environment)
+    }
+    return ClaudeQuotaCredential.uniqueByAccountKey(credentials)
   }
 
   public func persist(
@@ -69,17 +120,17 @@ public struct LocalClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading {
     for credential: ClaudeQuotaCredential,
     mode: QuotaOperatingMode
   ) async {
-    guard let path = credentialPaths().first(where: {
-      Self.load(path: $0)?.accountKey == credential.accountKey
-    }) else { return }
-    // Never write back to a file the Claude Code CLI owns, even if the caller
-    // asked: the write would replace a refresh token the CLI still expects.
-    guard allowsRefresh(path: path) else { return }
-    Self.persist(refresh, replacing: expectedRefreshToken, path: path)
-  }
-
-  private func allowsRefresh(path: String) -> Bool {
-    ClaudeCredentialOwnership.forAuthFile(at: path, environment: environment).allowsRefresh
+    for path in credentialPaths() {
+      if Self.persist(
+        refresh,
+        replacing: expectedRefreshToken,
+        for: credential,
+        path: path,
+        environment: environment
+      ) {
+        return
+      }
+    }
   }
 
   private func credentialPaths() -> [String] {
@@ -87,7 +138,7 @@ public struct LocalClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading {
     let nativeBase = ClaudeCredentialOwnership.configDirectory(environment: environment)
     paths.append((nativeBase as NSString).appendingPathComponent(".credentials.json"))
 
-    let directory = NSString(string: Self.legacyDirectory).expandingTildeInPath
+    let directory = NSString(string: legacyDirectory).expandingTildeInPath
     let legacy = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
     paths.append(
       contentsOf: legacy.filter { $0.hasPrefix("claude-") && $0.hasSuffix(".json") }
@@ -96,9 +147,22 @@ public struct LocalClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading {
   }
 
   public static func load(path: String, allowsRefresh: Bool = true) -> ClaudeQuotaCredential? {
-    let expanded = NSString(string: path).expandingTildeInPath
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return nil }
+    guard let file = SecureClaudeCredentialFile(path: path), let data = file.read() else {
+      return nil
+    }
     return load(data: data, allowsRefresh: allowsRefresh)
+  }
+
+  private static func load(
+    path: String,
+    environment: [String: String]
+  ) -> ClaudeQuotaCredential? {
+    guard let file = SecureClaudeCredentialFile(path: path), let data = file.read() else {
+      return nil
+    }
+    let ownership = ClaudeCredentialOwnership.forOpenedAuthFile(
+      at: file.path, referenceCount: file.referenceCount, environment: environment)
+    return load(data: data, allowsRefresh: ownership.allowsRefresh)
   }
 
   public static func load(
@@ -158,17 +222,25 @@ public struct LocalClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading {
   private static func persist(
     _ refresh: QuotaTokenRefresh,
     replacing expectedRefreshToken: String,
-    path: String
-  ) {
-    let url = URL(fileURLWithPath: path)
-    guard let current = try? Data(contentsOf: url),
+    for credential: ClaudeQuotaCredential,
+    path: String,
+    environment: [String: String]
+  ) -> Bool {
+    guard let file = SecureClaudeCredentialFile(path: path),
+      ClaudeCredentialOwnership.forOpenedAuthFile(
+        at: file.path, referenceCount: file.referenceCount, environment: environment
+      ).allowsRefresh,
+      let currentData = file.read(),
+      let current = load(data: currentData),
+      current.accountKey == credential.accountKey,
+      current.refreshToken == expectedRefreshToken,
       let updated = updatedData(
-        current,
+        currentData,
         refresh: refresh,
         replacing: expectedRefreshToken
       )
-    else { return }
-    try? SecureAtomicFileWriter.write(updated, to: url)
+    else { return false }
+    return file.replaceAtomically(with: updated)
   }
 
   private static func nonEmpty(_ value: String?) -> String? {
@@ -182,6 +254,116 @@ public struct LocalClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading {
     let fractional = ISO8601DateFormatter()
     fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+  }
+}
+
+/// Opens every path component with `O_NOFOLLOW`, then keeps the verified parent
+/// directory and file descriptors for the full read/replace operation.
+final class SecureClaudeCredentialFile {
+  let path: String
+  let referenceCount: UInt64
+
+  private let parentDescriptor: Int32
+  private let descriptor: Int32
+  private let name: String
+  private let device: dev_t
+  private let inode: ino_t
+
+  init?(path: String) {
+    let standardized = ClaudeCredentialOwnership.canonicalPath(path)
+    let components = URL(fileURLWithPath: standardized).pathComponents.dropFirst()
+    guard let name = components.last, name != ".", name != ".." else { return nil }
+
+    var parent = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    guard parent >= 0 else { return nil }
+    for component in components.dropLast() {
+      let next = component.withCString {
+        Darwin.openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+      }
+      Darwin.close(parent)
+      guard next >= 0 else { return nil }
+      parent = next
+    }
+
+    let file = name.withCString {
+      Darwin.openat(parent, $0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    }
+    guard file >= 0 else {
+      Darwin.close(parent)
+      return nil
+    }
+    var status = stat()
+    guard Darwin.fstat(file, &status) == 0, status.st_mode & S_IFMT == S_IFREG else {
+      Darwin.close(file)
+      Darwin.close(parent)
+      return nil
+    }
+
+    self.path = standardized
+    self.referenceCount = UInt64(status.st_nlink)
+    self.parentDescriptor = parent
+    self.descriptor = file
+    self.name = name
+    self.device = status.st_dev
+    self.inode = status.st_ino
+  }
+
+  deinit {
+    Darwin.close(descriptor)
+    Darwin.close(parentDescriptor)
+  }
+
+  func read() -> Data? {
+    guard Darwin.lseek(descriptor, 0, SEEK_SET) >= 0 else { return nil }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    return try? handle.readToEnd() ?? Data()
+  }
+
+  func replaceAtomically(with data: Data) -> Bool {
+    var current = stat()
+    let unchanged = name.withCString {
+      Darwin.fstatat(parentDescriptor, $0, &current, AT_SYMLINK_NOFOLLOW) == 0
+    }
+    guard unchanged, current.st_mode & S_IFMT == S_IFREG,
+      current.st_dev == device, current.st_ino == inode
+    else { return false }
+
+    let temporaryName = ".\(name).\(UUID().uuidString).tmp"
+    let temporary = temporaryName.withCString {
+      Darwin.openat(
+        parentDescriptor, $0,
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+        mode_t(0o600)
+      )
+    }
+    guard temporary >= 0 else { return false }
+
+    var succeeded = data.withUnsafeBytes { buffer -> Bool in
+      guard let base = buffer.baseAddress else { return true }
+      var written = 0
+      while written < buffer.count {
+        let count = Darwin.write(temporary, base.advanced(by: written), buffer.count - written)
+        if count <= 0 {
+          if errno == EINTR { continue }
+          return false
+        }
+        written += count
+      }
+      return Darwin.fsync(temporary) == 0
+    }
+    if Darwin.close(temporary) != 0 { succeeded = false }
+
+    if succeeded {
+      succeeded = temporaryName.withCString { source in
+        name.withCString { destination in
+          Darwin.renameat(parentDescriptor, source, parentDescriptor, destination) == 0
+        }
+      }
+    }
+    if !succeeded {
+      temporaryName.withCString { _ = Darwin.unlinkat(parentDescriptor, $0, 0) }
+    }
+    return succeeded
   }
 }
 

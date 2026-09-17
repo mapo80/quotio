@@ -59,8 +59,7 @@ public struct CompositeClaudeQuotaCredentialLoader: ClaudeQuotaCredentialLoading
       result.append(credential)
     }
 
-    var seen = Set<String>()
-    return result.filter { seen.insert($0.accountKey).inserted }
+    return ClaudeQuotaCredential.uniqueByAccountKey(result)
   }
 
   public func persist(

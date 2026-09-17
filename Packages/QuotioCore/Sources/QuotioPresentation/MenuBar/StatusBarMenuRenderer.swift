@@ -14,12 +14,71 @@ import AppKit
 import QuotioDomain
 import SwiftUI
 
+@MainActor
+@Observable
+final class StatusBarProviderFilterController {
+    enum Scope {
+        case provider(QuotaProvider)
+        case allProvidersOnly
+    }
+
+    var selectedProvider: QuotaProvider?
+
+    @ObservationIgnored private weak var menu: NSMenu?
+    @ObservationIgnored private var scopes: [ObjectIdentifier: Scope] = [:]
+    @ObservationIgnored private let onSelectionChanged: (QuotaProvider?) -> Void
+
+    init(
+        selectedProvider: QuotaProvider?,
+        onSelectionChanged: @escaping (QuotaProvider?) -> Void
+    ) {
+        self.selectedProvider = selectedProvider
+        self.onSelectionChanged = onSelectionChanged
+    }
+
+    func register(_ item: NSMenuItem, scope: Scope) {
+        scopes[ObjectIdentifier(item)] = scope
+        item.isHidden = !isVisible(scope)
+    }
+
+    func activate(in menu: NSMenu) {
+        self.menu = menu
+        applySelection()
+    }
+
+    func select(_ provider: QuotaProvider?) {
+        guard selectedProvider != provider else { return }
+        selectedProvider = provider
+        applySelection()
+        onSelectionChanged(provider)
+    }
+
+    private func applySelection() {
+        guard let menu else { return }
+        for item in menu.items {
+            guard let scope = scopes[ObjectIdentifier(item)] else { continue }
+            item.isHidden = !isVisible(scope)
+        }
+        menu.update()
+    }
+
+    private func isVisible(_ scope: Scope) -> Bool {
+        switch scope {
+        case .provider(let provider):
+            selectedProvider == nil || selectedProvider == provider
+        case .allProvidersOnly:
+            selectedProvider == nil
+        }
+    }
+}
+
 // MARK: - Status Bar Menu Renderer
 
 @MainActor
 final class StatusBarMenuRenderer {
     private let snapshot: StatusBarMenuSnapshot
     private let commands: StatusBarCommandDispatcher
+    private let providerFilterController: StatusBarProviderFilterController
     private let menuWidth: CGFloat = 360
 
     init(
@@ -28,6 +87,16 @@ final class StatusBarMenuRenderer {
     ) {
         self.snapshot = snapshot
         self.commands = commands
+        let availableProviders = snapshot.providers.map(\.provider)
+        let selectedProvider = snapshot.selectedProvider.flatMap { provider in
+            availableProviders.contains(provider) ? provider : nil
+        }
+        self.providerFilterController = StatusBarProviderFilterController(
+            selectedProvider: selectedProvider,
+            onSelectionChanged: { provider in
+                commands.dispatch(.selectProvider(provider))
+            }
+        )
     }
     
     // MARK: - Build Menu
@@ -50,41 +119,47 @@ final class StatusBarMenuRenderer {
         if !providers.isEmpty {
             let pickerView = MenuProviderPickerView(
                 providers: providers.map(\.provider),
-                selectedProvider: selectedProvider(from: providers),
-                onProviderChanged: { provider in
-                    self.commands.dispatch(.selectProvider(provider))
-                }
+                controller: providerFilterController
             )
             menu.addItem(viewItem(for: pickerView))
             menu.addItem(NSMenuItem.separator())
 
-            let visibleProviders = visibleProviders(from: providers)
-            let showsProviderHeaders = selectedProvider(from: providers) == nil
-            for (index, providerSnapshot) in visibleProviders.enumerated() {
-                if showsProviderHeaders {
-                    let headerView = MenuProviderSectionHeader(
-                        provider: providerSnapshot.provider,
-                        isRefreshing: providerSnapshot.isRefreshing,
-                        supportsScopedRefresh: providerSnapshot.supportsScopedRefresh,
-                        onRefresh: {
-                            self.commands.dispatch(.refreshProvider(providerSnapshot.provider))
-                        }
-                    )
-                    menu.addItem(viewItem(for: headerView))
-                }
+            for (index, providerSnapshot) in providers.enumerated() {
+                let headerView = MenuProviderSectionHeader(
+                    provider: providerSnapshot.provider,
+                    isRefreshing: providerSnapshot.isRefreshing,
+                    supportsScopedRefresh: providerSnapshot.supportsScopedRefresh,
+                    onRefresh: {
+                        self.commands.dispatch(.refreshProvider(providerSnapshot.provider))
+                    }
+                )
+                let headerItem = viewItem(for: headerView)
+                providerFilterController.register(headerItem, scope: .allProvidersOnly)
+                menu.addItem(headerItem)
 
                 if providerSnapshot.accounts.isEmpty {
-                    menu.addItem(buildEmptyStateItem())
+                    let emptyItem = buildEmptyStateItem()
+                    providerFilterController.register(
+                        emptyItem,
+                        scope: .provider(providerSnapshot.provider)
+                    )
+                    menu.addItem(emptyItem)
                 } else {
                     for account in providerSnapshot.accounts {
                         let cardItem = buildAccountCardItem(account)
+                        providerFilterController.register(
+                            cardItem,
+                            scope: .provider(providerSnapshot.provider)
+                        )
                         menu.addItem(cardItem)
                     }
                 }
 
                 // Separator between provider groups (not after the last one)
-                if index < visibleProviders.count - 1 {
-                    menu.addItem(NSMenuItem.separator())
+                if index < providers.count - 1 {
+                    let separator = NSMenuItem.separator()
+                    providerFilterController.register(separator, scope: .allProvidersOnly)
+                    menu.addItem(separator)
                 }
             }
 
@@ -98,29 +173,14 @@ final class StatusBarMenuRenderer {
         for item in buildActionItems() {
             menu.addItem(item)
         }
+
+        providerFilterController.activate(in: menu)
         
         return menu
     }
-    
-    // MARK: - Data Helpers
 
-    private func selectedProvider(
-        from providers: [StatusBarMenuProviderSnapshot]
-    ) -> QuotaProvider? {
-        guard let provider = snapshot.selectedProvider,
-              providers.contains(where: { $0.provider == provider }) else {
-            return nil
-        }
-        return provider
-    }
-
-    private func visibleProviders(
-        from providers: [StatusBarMenuProviderSnapshot]
-    ) -> [StatusBarMenuProviderSnapshot] {
-        guard let provider = selectedProvider(from: providers) else {
-            return providers
-        }
-        return providers.filter { $0.provider == provider }
+    func activateProviderFilter(in menu: NSMenu) {
+        providerFilterController.activate(in: menu)
     }
 
     // MARK: - Header Item
@@ -330,22 +390,21 @@ private struct MenuProviderSectionHeader: View {
 
 private struct MenuProviderPickerView: View {
     let providers: [QuotaProvider]
-    let selectedProvider: QuotaProvider?
-    let onProviderChanged: (QuotaProvider?) -> Void
+    let controller: StatusBarProviderFilterController
     
     var body: some View {
         // Wrap providers in a flexible layout
         FlowLayout(spacing: 6) {
-            AllProviderFilterButton(isSelected: selectedProvider == nil) {
-                onProviderChanged(nil)
+            AllProviderFilterButton(isSelected: controller.selectedProvider == nil) {
+                controller.select(nil)
             }
 
             ForEach(providers) { provider in
                 ProviderFilterButton(
                     provider: provider,
-                    isSelected: selectedProvider == provider
+                    isSelected: controller.selectedProvider == provider
                 ) {
-                    onProviderChanged(provider)
+                    controller.select(provider)
                 }
             }
         }
@@ -712,11 +771,7 @@ private struct MenuAccountCardView: View {
         let summaryModels = data.models.filter { $0.name.hasPrefix("antigravity-") }
         if !summaryModels.isEmpty {
             return summaryModels
-                .map {
-                    AntigravityDisplayGroup(
-                        name: $0.displayName, percentage: $0.percentage, resetTime: $0.resetTime,
-                        rawName: $0.name)
-                }
+                .map { AntigravityDisplayGroup(name: $0.displayName, percentage: $0.percentage, resetTime: $0.resetTime) }
         }
 
         var groups: [AntigravityDisplayGroup] = []
@@ -869,23 +924,14 @@ private struct MenuAccountCardView: View {
         let isCardStyle = displayStyle == .card
         let models: [ModelBadgeData] = {
             if isAntigravity {
-                return antigravityGroups.map {
-                    ModelBadgeData(
-                        name: $0.name, rawName: $0.rawName, percentage: $0.percentage,
-                        resetTime: $0.resetTime)
-                }
+                return antigravityGroups.map { ModelBadgeData(name: $0.name, percentage: $0.percentage, resetTime: $0.resetTime) }
             } else {
                 let meterModels = data.models.filter { !$0.isStandaloneMetric }.map {
-                    ModelBadgeData(
-                        name: $0.displayName, rawName: $0.name, percentage: $0.percentage,
-                        resetTime: $0.resetTime, usage: $0.formattedUsage,
-                        isUnlimited: $0.isUnlimitedUsage)
+                    ModelBadgeData(name: $0.displayName, percentage: $0.percentage, resetTime: $0.resetTime)
                 }
                 guard isCardStyle else { return meterModels }
                 let standaloneModels = data.models.filter(\.isStandaloneMetric).map {
-                    ModelBadgeData(
-                        name: $0.displayName, rawName: $0.name, percentage: $0.percentage,
-                        resetTime: $0.resetTime, usage: $0.formattedUsage, isStandalone: true)
+                    ModelBadgeData(name: $0.displayName, percentage: $0.percentage, resetTime: $0.resetTime, usage: $0.formattedUsage)
                 }
                 return meterModels + standaloneModels
             }
@@ -907,10 +953,7 @@ private struct MenuAccountCardView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         FactoryDroidMenuSectionHeader(title: section.title)
                         quotaLayout(models: section.models.map {
-                            ModelBadgeData(
-                                name: $0.displayName, rawName: $0.name, percentage: $0.percentage,
-                                resetTime: $0.resetTime, usage: $0.formattedUsage,
-                                isUnlimited: $0.isUnlimitedUsage)
+                            ModelBadgeData(name: $0.displayName, percentage: $0.percentage, resetTime: $0.resetTime)
                         })
                     }
                 }
@@ -1773,39 +1816,15 @@ private struct ModelBadgeData: Identifiable {
     let percentage: Double
     let resetTime: String?
     let usage: String?
-    /// Raw metric identity (e.g. `five-hour-session`). Display names collide
-    /// across providers, so only this can tell us the window cadence.
-    let rawName: String
-    /// See `QuotaMetric.isUnlimitedUsage`.
-    let isUnlimited: Bool
-    /// See `QuotaMetric.isStandaloneMetric`. These carry the "no percentage"
-    /// sentinel deliberately; their value lives in `usage`.
-    let isStandalone: Bool
 
-    init(
-        name: String,
-        rawName: String = "",
-        percentage: Double,
-        resetTime: String?,
-        usage: String? = nil,
-        isUnlimited: Bool = false,
-        isStandalone: Bool = false
-    ) {
+    init(name: String, percentage: Double, resetTime: String?, usage: String? = nil) {
         self.name = name
-        self.rawName = rawName
         self.percentage = percentage
         self.resetTime = resetTime
         self.usage = usage
-        self.isUnlimited = isUnlimited
-        self.isStandalone = isStandalone
     }
 
     var id: String { name }
-
-    /// `QuotaMetric` signals "no data yet" with a percentage outside 0...100.
-    /// Treat it as unavailable rather than clamping it into a real-looking
-    /// 0%/100%.
-    var hasKnownPercentage: Bool { percentage >= 0 && percentage <= 100 }
 
     var formattedResetTime: String? {
         guard let resetTime = resetTime else { return nil }
@@ -1843,9 +1862,6 @@ private struct AntigravityDisplayGroup: Identifiable {
     let name: String
     let percentage: Double
     let resetTime: String?
-    /// Raw identity of the metric behind the group (e.g.
-    /// `antigravity-gemini-weekly`), which is what states the window cadence.
-    var rawName: String = ""
 
     var id: String { name }
 }
@@ -1859,37 +1875,6 @@ private func menuDisplayPercent(remainingPercent: Double, displayMode: QuotaDisp
 private func menuPercentText(remainingPercent: Double, displayMode: QuotaDisplayMode) -> String {
     guard remainingPercent >= 0 else { return "—" }
     return "\(Int(menuDisplayPercent(remainingPercent: remainingPercent, displayMode: displayMode)))%"
-}
-
-/// The equal-weight companion to the bar: an availability placeholder when
-/// there is no data, a reset countdown when one exists, the usage fraction for
-/// metrics with no timer, "unused" only when nothing has actually been
-/// consumed, and the percentage as a last resort.
-@MainActor
-private func menuHeroText(model: ModelBadgeData, displayMode: QuotaDisplayMode) -> String {
-    // A standalone amount or status has no percentage by design; its value is
-    // the whole point, so it must be read before the sentinel check.
-    if model.isStandalone, let usage = model.usage { return usage }
-    // A percentage outside 0...100 is the "no data" sentinel, not a measurement.
-    guard model.hasKnownPercentage else { return "—" }
-    if let resetTime = model.formattedResetTime { return resetTime }
-    // Usage before "unused": an unlimited metric sits at 100% remaining while
-    // still reporting a non-zero used count.
-    if let usage = model.usage, model.isUnlimited { return usage }
-    if model.percentage >= 100 { return "quota.state.unused".localized() }
-    if let usage = model.usage { return usage }
-    return menuPercentText(remainingPercent: model.percentage, displayMode: displayMode)
-}
-
-/// Spoken description for a menu ring, so VoiceOver can tell the metrics apart.
-@MainActor
-private func menuRingAccessibilityLabel(model: ModelBadgeData, heroText: String) -> String {
-    let value = model.hasKnownPercentage
-        ? "\(Int(model.percentage))%"
-        : "quota.state.unavailable".localized()
-    return [model.name, value, heroText, QuotaMetricWindow.caption(forMetricNamed: model.rawName)]
-        .compactMap { $0 }
-        .joined(separator: ", ")
 }
 
 private func menuStatusColor(remainingPercent: Double, displayMode: QuotaDisplayMode) -> Color {
@@ -1999,77 +1984,40 @@ private struct RingGridLayout: View {
     let models: [ModelBadgeData]
     let displayMode: QuotaDisplayMode
 
-    /// Shares `RingSlotArrangement` with the dashboard, so a metric that sits
-    /// in the second column there sits in the second column here too. When the
-    /// menu arranged positionally and the dashboard semantically, the two views
-    /// disagreed about the same account.
-    private var rows: [[ModelBadgeData?]] {
-        RingSlotArrangement.rows(
-            RingSlotArrangement.arrange(models, rawName: \.rawName)
-        )
+    private var columnCount: Int {
+        min(max(models.count, 1), 4)
     }
 
-    private func ringSize(for columnCount: Int) -> CGFloat {
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.flexible()), count: columnCount)
+    }
+
+    private var ringSize: CGFloat {
         columnCount >= 4 ? 36 : 40
     }
 
     var body: some View {
-        let rows = self.rows
+        // Auto-distribute 1-4 columns, cap at 4
+        LazyVGrid(columns: columns, spacing: 10) {
+            ForEach(models, id: \.name) { (model: ModelBadgeData) in
+                VStack(spacing: 4) {
+                    RingProgressView(percent: menuDisplayPercent(remainingPercent: model.percentage, displayMode: displayMode), size: ringSize, lineWidth: 4, tint: menuStatusColor(remainingPercent: model.percentage, displayMode: displayMode), showLabel: true)
 
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                let columnCount = RingSlotArrangement.columnCount(for: row)
+                    Text(model.name)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
 
-                HStack(spacing: 14) {
-                    ForEach(0..<columnCount, id: \.self) { index in
-                        if index < row.count, let model = row[index] {
-                            ringSlot(model, ringSize: ringSize(for: columnCount))
-                        } else {
-                            Color.clear.frame(maxWidth: .infinity)
-                        }
+                    if let resetTime = model.formattedResetTime {
+                        Text(resetTime)
+                            .font(.system(size: 8, design: .rounded))
+                            .foregroundStyle(.tertiary)
                     }
                 }
+                .frame(maxWidth: .infinity)
             }
         }
-    }
-
-    @ViewBuilder
-    private func ringSlot(_ model: ModelBadgeData, ringSize: CGFloat) -> some View {
-        let displayPercent = menuDisplayPercent(remainingPercent: model.percentage, displayMode: displayMode)
-        let statusColor = menuStatusColor(remainingPercent: model.percentage, displayMode: displayMode)
-        let heroText = menuHeroText(model: model, displayMode: displayMode)
-
-        HStack(spacing: 12) {
-            ZStack {
-                RingProgressView(percent: displayPercent, size: ringSize, lineWidth: 6, tint: statusColor, showLabel: false)
-                // `menuDisplayPercent` preserves the sentinel, so this label has
-                // to render the placeholder itself; `RingProgressView` would
-                // normally do it but is drawn here with `showLabel: false`.
-                Text(model.hasKnownPercentage ? "\(Int(displayPercent))" : "—")
-                    .font(.system(size: ringSize * 0.24, weight: .medium, design: .rounded))
-                    .foregroundStyle(model.hasKnownPercentage ? statusColor : Color.secondary)
-                    .monospacedDigit()
-            }
-
-            // The metric name is what makes a ring identifiable; without it a
-            // row of rings gives no way to tell Session from Weekly from Extra.
-            VStack(alignment: .leading, spacing: 1) {
-                Text(model.name.uppercased())
-                    .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    .tracking(0.3)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                Text(heroText)
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(model.hasKnownPercentage || model.isStandalone ? .primary : .secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(menuRingAccessibilityLabel(model: model, heroText: heroText))
     }
 }
 
@@ -2077,43 +2025,56 @@ private struct CardGridLayout: View {
     let models: [ModelBadgeData]
     let displayMode: QuotaDisplayMode
 
+    private var columns: [GridItem] {
+        // Single metric: full width. Multiple: 2 columns
+        if models.count == 1 {
+            return [GridItem(.flexible())]
+        } else {
+            return [GridItem(.flexible()), GridItem(.flexible())]
+        }
+    }
+    
     var body: some View {
-        VStack(spacing: 6) {
+        LazyVGrid(columns: columns, spacing: 8) {
             ForEach(models, id: \.name) { (model: ModelBadgeData) in
-                HStack(spacing: 8) {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(menuStatusColor(remainingPercent: model.percentage, displayMode: displayMode))
-                            .frame(width: 5, height: 5)
-                        Text(model.name.uppercased())
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(model.name)
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        if let caption = QuotaMetricWindow.caption(forMetricNamed: model.rawName) {
-                            Text(caption)
+                        Spacer()
+                        if let resetTime = model.formattedResetTime {
+                            Text(resetTime)
                                 .font(.system(size: 9, design: .rounded))
                                 .foregroundStyle(.tertiary)
-                                .lineLimit(1)
+                        }
+                        if let usage = model.usage {
+                            Text(usage)
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(.primary)
+                        } else {
+                            Text(menuPercentText(remainingPercent: model.percentage, displayMode: displayMode))
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(menuStatusColor(remainingPercent: model.percentage, displayMode: displayMode))
                         }
                     }
-                    .frame(width: 52, alignment: .leading)
 
-                    ModernProgressBar(
-                        percentage: model.percentage,
-                        height: 8,
-                        displayMode: displayMode
-                    )
-
-                    Text(menuHeroText(model: model, displayMode: displayMode))
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundStyle(model.hasKnownPercentage ? Color.primary : Color.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .frame(width: 68, alignment: .trailing)
+                    if model.usage == nil {
+                        ModernProgressBar(
+                            percentage: model.percentage,
+                            height: 4,
+                            displayMode: displayMode
+                        )
+                    }
                 }
+                .padding(8)
+                .background(Color.secondary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
     }
+
 }
 
 // MARK: - Shared Components

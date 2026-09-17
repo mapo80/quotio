@@ -16,6 +16,7 @@ public final class QuotaScreenModel {
     @ObservationIgnored private let coordinator: QuotaRefreshCoordinator
     @ObservationIgnored private var observationTask: Task<Void, Never>?
     @ObservationIgnored private var didChangeHandler: (@MainActor (QuotaSnapshot) -> Void)?
+    @ObservationIgnored private var isShutdown = false
 
     public init(
         coordinator: QuotaRefreshCoordinator,
@@ -59,7 +60,7 @@ public final class QuotaScreenModel {
     }
 
     public func bootstrap(mode: QuotaOperatingMode) async {
-        state = await coordinator.bootstrap(mode: mode)
+        resetObservation(to: await coordinator.bootstrap(mode: mode))
     }
 
     public func refresh(
@@ -68,12 +69,12 @@ public final class QuotaScreenModel {
         mode: QuotaOperatingMode,
         force: Bool = false
     ) async {
-        state = await coordinator.refresh(QuotaFetchRequest(
+        resetObservation(to: await coordinator.refresh(QuotaFetchRequest(
             provider: provider,
             scope: scope,
             mode: mode,
             force: force
-        ))
+        )))
     }
 
     public func refreshAll(
@@ -81,11 +82,11 @@ public final class QuotaScreenModel {
         providers: Set<QuotaProvider>? = nil,
         force: Bool = false
     ) async {
-        state = await coordinator.refreshAll(
+        resetObservation(to: await coordinator.refreshAll(
             mode: mode,
             providers: providers,
             force: force
-        )
+        ))
     }
 
     public func replaceQuotas(
@@ -94,20 +95,21 @@ public final class QuotaScreenModel {
         mode: QuotaOperatingMode
     ) async {
         await coordinator.replaceQuotas(quotas, for: provider, mode: mode)
-        state = await coordinator.snapshot
+        resetObservation(to: await coordinator.snapshot)
     }
 
     public func removeQuota(for account: QuotaAccountID, mode: QuotaOperatingMode) async {
         await coordinator.removeQuota(for: account, mode: mode)
-        state = await coordinator.snapshot
+        resetObservation(to: await coordinator.snapshot)
     }
 
     public func cancel(provider: QuotaProvider) async {
         await coordinator.cancel(provider: provider)
-        state = await coordinator.snapshot
+        resetObservation(to: await coordinator.snapshot)
     }
 
     public func shutdown() async {
+        isShutdown = true
         observationTask?.cancel()
         observationTask = nil
         await coordinator.cancelForTermination()
@@ -115,6 +117,7 @@ public final class QuotaScreenModel {
     }
 
     private func observe() {
+        guard !isShutdown else { return }
         let coordinator = coordinator
         observationTask = Task { [weak self] in
             let states = await coordinator.states()
@@ -123,5 +126,12 @@ public final class QuotaScreenModel {
                 self.state = state
             }
         }
+    }
+
+    private func resetObservation(to state: QuotaSnapshot) {
+        guard !isShutdown else { return }
+        observationTask?.cancel()
+        self.state = state
+        observe()
     }
 }
